@@ -17,7 +17,9 @@ struct Mode {
   Downsampler d;
   const char* name;
 };
-void PrintTo(const Mode& m, std::ostream* os) { *os << m.name; }
+void PrintTo(const Mode& m, std::ostream* os) {
+  *os << m.name;
+}
 
 const Mode kModes[] = {
     {Transform::Haar, Downsampler::Box, "haar"},
@@ -32,19 +34,36 @@ Region random_plane(int w, int h, int lo, int hi, unsigned seed) {
   Region r(Rect{0, 0, w, h});
   std::mt19937 rng(seed);
   std::uniform_int_distribution<int> U(lo, hi);
-  for (auto& v : r.v) v = U(rng);
+  for (auto& v : r.v) {
+    v = U(rng);
+  }
   return r;
+}
+
+// Overwrites every sample of `plane` outside `keep` with value(x, y).
+template <class ValueFn>
+void scribble_outside(Region& plane, const Rect& keep, ValueFn value) {
+  for (int y = 0; y < plane.rect.h; ++y) {
+    for (int x = 0; x < plane.rect.w; ++x) {
+      if (!intersect(keep, Rect{x, y, 1, 1}).w) {
+        plane.at(x, y) = value(x, y);
+      }
+    }
+  }
 }
 
 }  // namespace
 
-// ---------------------------------------------------------------- level definitions
+// ----------------------------------------------------------------------------
+// Level definitions
 
-class PyramidVsReference : public ::testing::TestWithParam<std::tuple<Mode, ColorFormat>> {};
+class PyramidVsReference
+    : public ::testing::TestWithParam<std::tuple<Mode, ColorFormat>> {};
 
 TEST_P(PyramidVsReference, MatchesIndependentReference) {
   const auto [mode, fmt] = GetParam();
-  for (auto [w, h] : {std::pair{64, 64}, std::pair{101, 77}, std::pair{1, 9}, std::pair{2, 3}, std::pair{257, 130}}) {
+  for (auto [w, h] : {std::pair{64, 64}, std::pair{101, 77}, std::pair{1, 9},
+                      std::pair{2, 3}, std::pair{257, 130}}) {
     const Image src = ref::synthetic_image(w, h, fmt, unsigned(w * 31 + h));
     const auto got = build_pyramid(src, 5, mode.t, mode.d);
     const auto exp = ref::pyramid(src, 5, mode.t, mode.d);
@@ -53,32 +72,40 @@ TEST_P(PyramidVsReference, MatchesIndependentReference) {
       ASSERT_EQ(got[L].width, exp[L].width) << mode.name << " L" << L;
       ASSERT_EQ(got[L].height, exp[L].height) << mode.name << " L" << L;
       EXPECT_EQ(got[L].width, (w + (1 << L) - 1) >> L);
-      ASSERT_EQ(got[L].pixels, exp[L].pixels) << mode.name << " " << w << "x" << h << " L" << L;
+      ASSERT_EQ(got[L].pixels, exp[L].pixels)
+          << mode.name << " " << w << "x" << h << " L" << L;
     }
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(All, PyramidVsReference,
-                         ::testing::Combine(::testing::ValuesIn(kModes),
-                                            ::testing::Values(ColorFormat::Gray8, ColorFormat::RGB8)),
-                         [](const auto& info) {
-                           return std::string(std::get<0>(info.param).name) + "_" +
-                                  prmd::info(std::get<1>(info.param)).name;
-                         });
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    PyramidVsReference,
+    ::testing::Combine(::testing::ValuesIn(kModes),
+                       ::testing::Values(ColorFormat::Gray8,
+                                         ColorFormat::RGB8)),
+    [](const auto& info) {
+      return std::string(std::get<0>(info.param).name) + "_" +
+             prmd::info(std::get<1>(info.param)).name;
+    });
 
 TEST(Pyramid, HaarIsTheTwoByTwoMean) {
   Image img(2, 2);
   img.pixels = {100, 104, 98, 110};
-  EXPECT_EQ(build_pyramid(img, 2, Transform::Haar, Downsampler::Box)[1].at(0, 0), 103);
+  EXPECT_EQ(
+      build_pyramid(img, 2, Transform::Haar, Downsampler::Box)[1].at(0, 0),
+      103);
 }
 
-// ---------------------------------------------------------------- transforms
+// ----------------------------------------------------------------------------
+// Transforms
 
 class TransformTest : public ::testing::TestWithParam<Mode> {};
 
 TEST_P(TransformTest, ForwardInverseIdentityWholePlane) {
   const auto xf = make_transform(GetParam().t, GetParam().d);
-  for (auto [w, h] : {std::pair{16, 16}, std::pair{17, 9}, std::pair{1, 1}, std::pair{2, 1}, std::pair{1, 5}, std::pair{63, 64}}) {
+  for (auto [w, h] : {std::pair{16, 16}, std::pair{17, 9}, std::pair{1, 1},
+                      std::pair{2, 1}, std::pair{1, 5}, std::pair{63, 64}}) {
     // Wide value range: Cdf53 levels > 0 carry values outside [0, 255].
     const Region fine = random_plane(w, h, -300, 600, unsigned(w * 7 + h));
     Region coarse;
@@ -98,8 +125,8 @@ TEST_P(TransformTest, ForwardInverseIdentityWholePlane) {
   }
 }
 
-// Region inverse equals the full inverse, and depends only on samples inside *_needed:
-// everything outside those rects is overwritten with garbage first.
+// Region inverse equals the full inverse, and depends only on samples inside
+// *_needed: everything outside those rects is overwritten with garbage first.
 TEST_P(TransformTest, RegionInverseUsesOnlyNeededSamples) {
   const auto xf = make_transform(GetParam().t, GetParam().d);
   std::mt19937 rng(42);
@@ -110,33 +137,43 @@ TEST_P(TransformTest, RegionInverseUsesOnlyNeededSamples) {
     xf->forward(fine, coarse, bands);
     const Dims fd{w, h};
     for (int it = 0; it < 300; ++it) {
-      const int x = int(rng() % unsigned(w)), y = int(rng() % unsigned(h));
-      const int rw = 1 + int(rng() % unsigned(w - x)), rh = 1 + int(rng() % unsigned(h - y));
+      const int x = int(rng() % unsigned(w));
+      const int y = int(rng() % unsigned(h));
+      const int rw = 1 + int(rng() % unsigned(w - x));
+      const int rh = 1 + int(rng() % unsigned(h - y));
       const Rect r{x, y, rw, rh};
-      const Rect cn = xf->coarse_needed(r, fd), bn = xf->band_needed(r, fd);
+
       Region c2 = coarse;
-      for (int yy = 0; yy < c2.rect.h; ++yy)
-        for (int xx = 0; xx < c2.rect.w; ++xx)
-          if (!intersect(cn, Rect{xx, yy, 1, 1}).w) c2.at(xx, yy) = 0x5EED + xx;
+      scribble_outside(c2, xf->coarse_needed(r, fd),
+                       [](int xx, int) { return 0x5EED + xx; });
       std::vector<Region> b2 = bands;
-      for (auto& b : b2)
-        for (int yy = 0; yy < b.rect.h; ++yy)
-          for (int xx = 0; xx < b.rect.w; ++xx)
-            if (!intersect(bn, Rect{xx, yy, 1, 1}).w) b.at(xx, yy) = -777 - yy;
+      for (auto& b : b2) {
+        scribble_outside(b, xf->band_needed(r, fd),
+                         [](int, int yy) { return -777 - yy; });
+      }
+
       Region out;
       xf->inverse(c2, b2, r, fd, out);
       ASSERT_EQ(out.rect, r);
-      for (int yy = r.y; yy < r.bottom(); ++yy)
-        for (int xx = r.x; xx < r.right(); ++xx)
+      for (int yy = r.y; yy < r.bottom(); ++yy) {
+        for (int xx = r.x; xx < r.right(); ++xx) {
           ASSERT_EQ(out.at(xx, yy), fine.at(xx, yy))
-              << GetParam().name << " rect " << r.x << "," << r.y << " " << r.w << "x" << r.h;
+              << GetParam().name << " rect " << r.x << "," << r.y << " " << r.w
+              << "x" << r.h;
+        }
+      }
     }
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(All, TransformTest, ::testing::ValuesIn(kXformModes),
-                         [](const auto& info) { return std::string(info.param.name); });
+INSTANTIATE_TEST_SUITE_P(All,
+                         TransformTest,
+                         ::testing::ValuesIn(kXformModes),
+                         [](const auto& info) {
+                           return std::string(info.param.name);
+                         });
 
 TEST(Transform, IndependentHasNoLevelTransform) {
-  EXPECT_THROW(make_transform(Transform::Independent, Downsampler::Box), std::invalid_argument);
+  EXPECT_THROW(make_transform(Transform::Independent, Downsampler::Box),
+               std::invalid_argument);
 }

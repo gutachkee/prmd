@@ -1,6 +1,6 @@
-// JPEG2000 backend: same crop matrix as .prmd, against J2K's own full-level decode
-// (its levels are 5/3 LL bands, not the 2×2 mean). Level 0 is lossless, so it is also
-// compared with the source.
+// JPEG2000 backend: same crop matrix as .prmd, against J2K's own full-level
+// decode (its levels are 5/3 LL bands, not the 2×2 mean). Level 0 is lossless,
+// so it is also compared with the source.
 
 #include <gtest/gtest.h>
 
@@ -25,9 +25,12 @@ struct J2kFixture {
 
 const J2kFixture& j2k_fixture(int w, int h, ColorFormat f, int tile) {
   static std::map<std::string, J2kFixture> cache;
-  const std::string key = std::to_string(w) + "x" + std::to_string(h) + "_" + info(f).name + "_t" + std::to_string(tile);
+  const std::string key = std::to_string(w) + "x" + std::to_string(h) + "_" +
+                          info(f).name + "_t" + std::to_string(tile);
   auto it = cache.find(key);
-  if (it != cache.end()) return it->second;
+  if (it != cache.end()) {
+    return it->second;
+  }
   J2kFixture fx;
   fx.src = ref::synthetic_image(w, h, f, unsigned(w + 7 * h));
   fx.path = testutil::temp_path("j2k_" + key + ".j2k").string();
@@ -46,11 +49,13 @@ const J2kFixture& j2k_fixture(int w, int h, ColorFormat f, int tile) {
 
 }  // namespace
 
-class J2kTest : public ::testing::TestWithParam<std::tuple<ColorFormat, int>> {};
+class J2kTest : public ::testing::TestWithParam<std::tuple<ColorFormat, int>> {
+};
 
 TEST_P(J2kTest, LosslessAndCropsMatchFullDecode) {
   const auto [fmt, tile] = GetParam();
-  const int w = fmt == ColorFormat::Gray8 ? 1000 : 512, h = fmt == ColorFormat::Gray8 ? 777 : 384;
+  const int w = fmt == ColorFormat::Gray8 ? 1000 : 512,
+            h = fmt == ColorFormat::Gray8 ? 777 : 384;
   const J2kFixture& fx = j2k_fixture(w, h, fmt, tile);
   auto dec = open_decoder(fx.path);
   EXPECT_EQ(dec->num_levels(), 5);
@@ -65,36 +70,43 @@ TEST_P(J2kTest, LosslessAndCropsMatchFullDecode) {
   for (int i = 0; i < 150; ++i) {
     const int L = int(rng() % 5u);
     const LevelInfo li = dec->level_info(L);
-    const int cw = 1 + int(rng() % unsigned(std::min(li.width, 300)));
-    const int ch = 1 + int(rng() % unsigned(std::min(li.height, 300)));
-    const Rect r{int(rng() % unsigned(li.width - cw + 1)), int(rng() % unsigned(li.height - ch + 1)), cw, ch};
+    const Rect r = testutil::random_rect(rng, li.width, li.height, 300);
     const auto res = dec->decode(L, r);
     ASSERT_EQ(res.image.pixels, fx.full[size_t(L)].crop(r).pixels)
-        << "L" << L << " {" << r.x << "," << r.y << "," << r.w << "," << r.h << "}";
+        << "L" << L << " " << testutil::to_string(r);
   }
+
   // Corners and edges at every level.
   for (int L = 0; L < 5; ++L) {
     const LevelInfo li = dec->level_info(L);
-    for (const Rect& r : {Rect{0, 0, 1, 1}, Rect{li.width - 1, li.height - 1, 1, 1},
-                          Rect{li.width - std::min(li.width, 40), 0, std::min(li.width, 40), std::min(li.height, 30)}})
-      ASSERT_EQ(dec->decode(L, r).image.pixels, fx.full[size_t(L)].crop(r).pixels);
+    const int edge_w = std::min(li.width, 40);
+    const int edge_h = std::min(li.height, 30);
+    for (const Rect& r :
+         {Rect{0, 0, 1, 1}, Rect{li.width - 1, li.height - 1, 1, 1},
+          Rect{li.width - edge_w, 0, edge_w, edge_h}}) {
+      ASSERT_EQ(dec->decode(L, r).image.pixels,
+                fx.full[size_t(L)].crop(r).pixels);
+    }
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(All, J2kTest,
-                         ::testing::Combine(::testing::Values(ColorFormat::Gray8, ColorFormat::RGB8),
-                                            ::testing::Values(256, 1024)),
-                         [](const auto& info) {
-                           return std::string(prmd::info(std::get<0>(info.param)).name) + "_t" +
-                                  std::to_string(std::get<1>(info.param));
-                         });
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    J2kTest,
+    ::testing::Combine(::testing::Values(ColorFormat::Gray8, ColorFormat::RGB8),
+                       ::testing::Values(256, 1024)),
+    [](const auto& info) {
+      return std::string(prmd::info(std::get<0>(info.param)).name) + "_t" +
+             std::to_string(std::get<1>(info.param));
+    });
 
 TEST(J2k, TlmLetsSingleTileCropsSkipData) {
   const J2kFixture& fx = j2k_fixture(1000, 777, ColorFormat::Gray8, 256);
   auto dec = open_decoder(fx.path);
   const auto res = dec->decode(0, {300, 300, 100, 100});  // inside one 256 tile
   EXPECT_EQ(res.stats.tiles_touched, 1);
-  EXPECT_LT(res.stats.bytes_read * 4, dec->file_bytes()) << "a one-tile crop must not read most of the file";
+  EXPECT_LT(res.stats.bytes_read * 4, dec->file_bytes())
+      << "a one-tile crop must not read most of the file";
 }
 
 TEST(J2k, Bounds) {

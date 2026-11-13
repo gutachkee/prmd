@@ -11,9 +11,9 @@ namespace {
 
 struct Sym {
   bool direct;
-  int ctx;        // context index for adaptive bits
+  int ctx;         // context index for adaptive bits
   uint32_t value;  // bit (adaptive) or value (direct)
-  int nbits;      // direct only
+  int nbits;       // direct only
 };
 
 std::vector<uint8_t> encode(const std::vector<Sym>& syms, int nctx) {
@@ -21,10 +21,11 @@ std::vector<uint8_t> encode(const std::vector<Sym>& syms, int nctx) {
   RangeEncoder enc(out);
   std::vector<Prob> probs(size_t(nctx), kProbInit);
   for (const auto& s : syms) {
-    if (s.direct)
+    if (s.direct) {
       enc.encode_direct(s.value, s.nbits);
-    else
+    } else {
       enc.encode_bit(probs[size_t(s.ctx)], int(s.value));
+    }
   }
   enc.finish();
   return out;
@@ -36,7 +37,9 @@ void expect_roundtrip(const std::vector<Sym>& syms, int nctx) {
   std::vector<Prob> probs(size_t(nctx), kProbInit);
   for (size_t i = 0; i < syms.size(); ++i) {
     const auto& s = syms[i];
-    const uint32_t got = s.direct ? dec.decode_direct(s.nbits) : uint32_t(dec.decode_bit(probs[size_t(s.ctx)]));
+    const uint32_t got = s.direct
+                             ? dec.decode_direct(s.nbits)
+                             : uint32_t(dec.decode_bit(probs[size_t(s.ctx)]));
     ASSERT_EQ(got, s.value) << "symbol " << i;
   }
   EXPECT_EQ(dec.overrun(), 0u);
@@ -51,7 +54,9 @@ TEST(RangeCoder, EmptyStream) {
 TEST(RangeCoder, RandomBitsManyContexts) {
   std::mt19937 rng(1);
   std::vector<Sym> syms;
-  for (int i = 0; i < 200000; ++i) syms.push_back({false, int(rng() % 64), uint32_t(rng() & 1u), 0});
+  for (int i = 0; i < 200000; ++i) {
+    syms.push_back({false, int(rng() % 64), uint32_t(rng() & 1u), 0});
+  }
   expect_roundtrip(syms, 64);
 }
 
@@ -60,7 +65,9 @@ TEST(RangeCoder, SkewedBitsCompress) {
   std::bernoulli_distribution one(0.02);
   std::vector<Sym> syms;
   const int n = 100000;
-  for (int i = 0; i < n; ++i) syms.push_back({false, 0, uint32_t(one(rng)), 0});
+  for (int i = 0; i < n; ++i) {
+    syms.push_back({false, 0, uint32_t(one(rng)), 0});
+  }
   expect_roundtrip(syms, 1);
   // Entropy of p=0.02 is ~0.14 bit/symbol; allow adaptation overhead.
   const auto bytes = encode(syms, 1);
@@ -99,10 +106,13 @@ TEST(RangeCoder, MixedAdaptiveAndDirect) {
 }
 
 TEST(RangeCoder, CarryPropagationStress) {
-  // Long runs of highly probable 1s push `low` toward carries through 0xFF bytes.
+  // Long runs of highly probable 1s push `low` toward carries through 0xFF
+  // bytes.
   std::vector<Sym> syms;
   for (int r = 0; r < 50; ++r) {
-    for (int i = 0; i < 3000; ++i) syms.push_back({false, 0, 1, 0});
+    for (int i = 0; i < 3000; ++i) {
+      syms.push_back({false, 0, 1, 0});
+    }
     syms.push_back({false, 0, 0, 0});
     syms.push_back({true, 0, 0xFFFFFFu, 24});
   }
@@ -112,11 +122,15 @@ TEST(RangeCoder, CarryPropagationStress) {
 TEST(RangeCoder, TruncatedInputDoesNotCrash) {
   std::mt19937 rng(5);
   std::vector<Sym> syms;
-  for (int i = 0; i < 10000; ++i) syms.push_back({false, 0, uint32_t(rng() & 1u), 0});
+  for (int i = 0; i < 10000; ++i) {
+    syms.push_back({false, 0, uint32_t(rng() & 1u), 0});
+  }
   auto bytes = encode(syms, 1);
   bytes.resize(bytes.size() / 2);
   RangeDecoder dec(bytes.data(), bytes.size());
   Prob p = kProbInit;
-  for (int i = 0; i < 10000; ++i) (void)dec.decode_bit(p);
+  for (int i = 0; i < 10000; ++i) {
+    (void)dec.decode_bit(p);
+  }
   EXPECT_GT(dec.overrun(), 0u);
 }

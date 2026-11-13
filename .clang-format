@@ -1,0 +1,6 @@
+BasedOnStyle: Chromium
+# Keep the hand-made include groups (C system, C++ standard, third-party,
+# project); clang-format only sorts within each group.
+IncludeBlocks: Preserve
+# Brace every control statement, including one-line bodies.
+InsertBraces: true
