@@ -1,0 +1,17 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# Editor / tooling caches
+.cache/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Files produced by the CLI and benchmark (committed results live in bench/)
+*.prmd
+*.j2k
+crop*.png

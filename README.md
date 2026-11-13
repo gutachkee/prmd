@@ -1,0 +1,95 @@
+# Prmd: random-access crops from a single-file image pyramid
+
+`prmd` stores an image and its N-level 2× pyramid in **one file** (`.prmd`) and decodes any
+`(level, x, y, w, h)` crop by reading and decoding only the code-blocks that crop depends on.
+Coarser levels are not stored separately. Each finer level is stored as **detail bands
+relative to the level above it** (integer Haar or 5/3 wavelet), so the whole pyramid costs
+about as much as level 0 alone. A JPEG2000 (OpenJPEG) backend and a naive "every level tiled
+independently" layout are built in for comparison.
+
+- Design and interfaces: [`docs/DESIGN.md`](docs/DESIGN.md)
+- Results write-up: [`docs/WRITEUP.md`](docs/WRITEUP.md)
+- Raw benchmark output: [`bench/results.md`](bench/results.md), [`bench/results_rgb.md`](bench/results_rgb.md)
+
+## Build
+
+Requirements: a C++17 compiler, CMake ≥ 3.16, and the development packages for libjpeg(-turbo),
+libpng, zstd, OpenJPEG 2.5 and GoogleTest. On Debian/Ubuntu:
+
+```sh
+sudo apt install build-essential cmake pkg-config \
+     libjpeg-turbo8-dev libpng-dev libzstd-dev libopenjp2-7-dev libgtest-dev
+```
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release        # -DPRMD_NATIVE=OFF to skip -mcpu=native
+cmake --build build -j
+ctest --test-dir build -j8 --output-on-failure    # 198 tests
+```
+
+This produces `build/prmd` (CLI), `build/prmdbench` (benchmark) and `build/prmd_tests`.
+
+## Use
+
+```sh
+# Encode (input: JPEG or PNG; stored as gray by default)
+build/prmd encode test_image.jpg img.prmd --levels 5
+build/prmd encode test_image.jpg img_rgb.prmd --levels 5 --color rgb --mode cdf53
+build/prmd encode test_image.jpg img_q4.prmd --mode cdf53 --quant 4      # lossy
+build/prmd encode test_image.jpg img.j2k --codec j2k --levels 5          # JPEG2000 comparison
+
+# Decode a crop to PNG (coordinates are in that level's pixels)
+build/prmd decode img.prmd --level 1 --x 1900 --y 1100 --w 512 --h 512 -o crop.png --stats
+
+# Out-of-bounds requests are rejected (exit code 4); --clamp decodes the intersection instead
+build/prmd decode img.prmd --level 3 --x 1000 --y 600 --w 256 --h 256 -o crop.png --clamp
+
+# Inspect a file: levels, blocks, bytes per level
+build/prmd info img.prmd
+```
+
+`prmd encode` options:
+
+| option | values | default |
+|---|---|---|
+| `--codec` | `prmd`, `j2k` | `prmd` |
+| `--color` | `gray`, `rgb` | `gray` |
+| `--mode` | `haar` (exact 2×2 mean), `cdf53` (5/3 wavelet), `laplacian` (any downsampler + residual), `naive` (independent levels) | `haar` |
+| `--down` | `box`, `gauss` (for `laplacian` / `naive`) | `box` |
+| `--levels` | 1–16 | 5 |
+| `--tile`, `--cblk` | tile (reporting unit) and code-block (decode unit) size | 256, 128 |
+| `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~10× slower decode), `raw` | `zstd` — see [DESIGN.md §7.1](docs/DESIGN.md) |
+| `--entropy-level` | zstd level 1–22 | 19 |
+| `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
+| `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
+
+Exit codes: 0 ok, 1 usage, 2 I/O error, 3 format error, 4 out of range.
+
+## Library API (C++)
+
+```cpp
+#include "prmd/crop_decoder.h"
+#include "prmd/encoder.h"
+#include "prmd/image_io.h"
+
+prmd::EncodeOptions opt;            // levels, color, transform, entropy, tile/cblk, ...
+prmd::encode_file(prmd::load_image("in.jpg"), "img.prmd", prmd::Codec::Prmd, opt);
+
+auto dec = prmd::open_decoder("img.prmd");        // .prmd or .j2k, chosen by file magic
+prmd::DecodeResult r = dec->decode(2, {100, 50, 256, 256});
+// r.image (Gray8/RGB8), r.rect, r.stats {tiles_touched, blocks_decoded, bytes_read, read_calls, ...}
+```
+
+## Benchmark
+
+```sh
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --out bench/results.md
+build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
+                --codecs haar,cdf53,naive,j2k-t256,haar+range --out bench/results_rgb.md
+```
+
+It reports file sizes (vs raw and vs naive), mean/p50/p95 latency for random 256² and 512² crops
+at every level, tiles touched, blocks decoded and bytes read per crop, an entropy-coder comparison
+(zstd/range/raw on haar, cdf53 and naive, so "vs naive" is always same-coder),
+a cached random-walk trajectory, full-level decode times, and PSNR of each codec's levels against
+the plain 2×2-mean pyramid. Level-3 sample crops are written to `bench/samples/`.
