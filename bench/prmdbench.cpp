@@ -653,7 +653,30 @@ void full_decode_table(Run& run, std::ostringstream& md) {
      << t.str() << "\n";
 }
 
-// Every level vs the plain 2×2-mean (haar) pyramid; saves level-3 samples.
+// Name of the level definition a codec produces, i.e. which images its levels
+// are. Codecs with the same definition decode identical levels (the entropy
+// coder never changes pixels), so one sample PNG per definition is enough.
+std::string level_definition(const CodecSpec& spec) {
+  if (spec.codec == Codec::J2K) {
+    // J2K runs the 5/3 transform per tile with symmetric extension at tile
+    // borders, so its levels differ from whole-image cdf53 near tile edges
+    // and depend on the tile size: each tiling is its own definition.
+    return spec.name;
+  }
+  switch (spec.opt.transform) {
+    case Transform::Haar:
+      return "haar";
+    case Transform::Cdf53:
+      return "cdf53";
+    case Transform::Laplacian:
+    case Transform::Independent:
+      return to_string(spec.opt.downsampler);  // "box" or "gauss"
+  }
+  return "unknown";
+}
+
+// Every level vs the plain 2×2-mean (haar) pyramid; saves one level-3 sample
+// per level definition.
 void level_quality_table(Run& run, std::ostringstream& md) {
   const auto haar = build_pyramid(run.img, run.args.levels, Transform::Haar,
                                   Downsampler::Box);
@@ -663,6 +686,11 @@ void level_quality_table(Run& run, std::ostringstream& md) {
   }
   const fs::path samples = fs::path(run.args.out).parent_path() / "samples";
   fs::create_directories(samples);
+  std::map<std::string, std::string> definition_of;  // codec name -> definition
+  for (const auto& spec : all_specs(run.args.levels, run.color)) {
+    definition_of[spec.name] = level_definition(spec);
+  }
+  std::map<std::string, std::vector<std::string>> sampled;  // definition -> codecs
 
   for (const auto& n : run.args.codecs) {
     if (!run.dec.count(n)) {
@@ -675,11 +703,15 @@ void level_quality_table(Run& run, std::ostringstream& md) {
           run.dec[n]->decode(level, {0, 0, li.width, li.height}).image;
       row.push_back(psnr_s(psnr(decoded, haar[size_t(level)])));
 
+      const std::string& def = definition_of.at(n);
       if (level == 3) {
-        const int s = std::min(256, li.width);
-        const Rect center{(li.width - s) / 2, (li.height - s) / 2, s, s};
-        save_png((samples / (n + "_" + run.cname + "_L3.png")).string(),
-                 decoded.crop(center));
+        if (!sampled.count(def)) {
+          const int s = std::min(256, li.width);
+          const Rect center{(li.width - s) / 2, (li.height - s) / 2, s, s};
+          save_png((samples / (def + "_" + run.cname + "_L3.png")).string(),
+                   decoded.crop(center));
+        }
+        sampled[def].push_back(n);
       }
     }
     t.rows.push_back(row);
@@ -687,10 +719,18 @@ void level_quality_table(Run& run, std::ostringstream& md) {
 
   md << "### Level definitions compared: PSNR of each codec's level vs the "
         "2×2-mean pyramid\n\n"
-     << "Level 0 is identical (lossless) for every codec. Center 256² of each "
-        "level 3 is saved in `"
-     << samples.string() << "/`.\n\n"
-     << t.str() << "\n";
+     << "Level 0 is identical (lossless) for every codec. Codecs with the same "
+        "level definition decode identical levels, so the center 256² of level 3 "
+        "is saved once per definition in `"
+     << samples.string() << "/`:\n\n";
+  for (const auto& [def, codecs] : sampled) {
+    md << "- `" << def << "_" << run.cname << "_L3.png`:";
+    for (const auto& c : codecs) {
+      md << " " << c;
+    }
+    md << "\n";
+  }
+  md << "\n" << t.str() << "\n";
 }
 
 // .prmd (--quant) vs JPEG2000 9/7.

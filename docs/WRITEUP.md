@@ -6,7 +6,7 @@
 - **Size:** the lossless `.prmd` file holds all 5 levels of a 4096² image in **11.2–11.6 MiB**. The naive layout, using the same entropy coder, needs 15.0 MiB, so `.prmd` is **23–26% smaller**. The whole pyramid costs less than raw level 0 alone (16 MiB).
 - **Speed:** a random 256² crop decodes in **0.5–0.7 ms** at any level, reading about 150 KiB.
 
-All numbers are from `bench/results.md`: the user's aerial JPEG, converted to gray and center-cropped to 4096², 5 levels, 300 random crops per row, on one Apple-class AArch64 core with the file in the page cache.
+All numbers come from `prmdbench` (commands in the README): the user's aerial JPEG, converted to gray and center-cropped to 4096², 5 levels, 300 random crops per row, on one Apple-class AArch64 core with the file in the page cache.
 
 ## 1. Levels
 
@@ -71,7 +71,7 @@ On an embedded ARM target, `.prmd` needs about 2 kLOC of plain C++17 plus zstd. 
 - **Haar is still faster than naive.** Its detail blocks skip the serial MED predictor that every naive pixel block runs. The `raw` coder isolates this: 0.37 vs 0.65 ms.
 - **Random access pays off.** Decoding the full L0 and then cropping costs 77 ms (haar), which is **140×** more than the crop.
 - **Repeated crops:** along a 1000-step navigation-like random walk with a 64 MiB block cache, a haar crop drops from 0.51 ms to 0.17 ms.
-- **RGB** (`results_rgb.md`): haar is 22.9 MiB (−22.8% vs naive) and a 256² L0 crop takes 2.0 ms; J2K is 21.0 MiB at 25 ms.
+- **RGB** (same image, 100 crops per row): haar is 22.9 MiB (−22.8% vs naive) and a 256² L0 crop takes 2.0 ms; J2K is 21.0 MiB at 25 ms.
 
 **Lossy mode** (`--quant Q`):
 - The decode path and random access are unchanged.

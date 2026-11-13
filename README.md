@@ -9,7 +9,7 @@ independently" layout are built in for comparison.
 
 - Design and interfaces: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Results write-up: [`docs/WRITEUP.md`](docs/WRITEUP.md)
-- Raw benchmark output: [`bench/results.md`](bench/results.md), [`bench/results_rgb.md`](bench/results_rgb.md)
+- Benchmark: the key numbers are in the write-up; full tables are regenerated with `prmdbench` (below)
 
 ## Build
 
@@ -92,4 +92,11 @@ It reports file sizes (vs raw and vs naive), mean/p50/p95 latency for random 256
 at every level, tiles touched, blocks decoded and bytes read per crop, an entropy-coder comparison
 (zstd/range/raw on haar, cdf53 and naive, so "vs naive" is always same-coder),
 a cached random-walk trajectory, full-level decode times, and PSNR of each codec's levels against
-the plain 2×2-mean pyramid. Level-3 sample crops are written to `bench/samples/`.
+the plain 2×2-mean pyramid.
+
+The reports (`bench/results*.md`) are build output and are not tracked in git. The run also writes
+`bench/samples/`, which is tracked: the centre 256² of level 3, saved **once per level definition**
+(`haar`, `box`, `gauss`, `cdf53`, and each JPEG2000 tiling), for comparing aliasing and blur by eye.
+Codecs that share a definition, such as `naive` and `laplacian-box`, or a mode under any entropy
+coder, decode identical levels. JPEG2000 runs its 5/3 transform per tile, so its levels differ
+slightly from whole-image `cdf53` near tile borders, and each tiling gets its own sample.

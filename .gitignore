@@ -15,3 +15,6 @@ compile_commands.json
 *.prmd
 *.j2k
 crop*.png
+
+# Benchmark reports (regenerate with prmdbench; see README)
+bench/results*.md

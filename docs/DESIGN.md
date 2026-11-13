@@ -607,7 +607,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 40
 
 **Context.** The original default was `range`, chosen on the assumption that a context-adaptive coder was needed for the ratio and that zstd would cost 15–30% in size. The benchmark disproved that assumption. It also showed that the range coder dominates decode time: `raw`, which has no entropy stage, decodes a 256² L0 crop in 0.37 ms, while `range` takes 7.0 ms.
 
-**Evidence** (`bench/results.md`, gray 4096², 5 levels, 300 crops per cell; `bench/results_rgb.md` for RGB):
+**Evidence** (`prmdbench` gray run: 4096², 5 levels, 300 crops per cell; RGB run: 100 crops per cell; commands in the README):
 
 | | zstd 19 (default) | range | zstd vs range |
 |---|---:|---:|---:|
@@ -695,7 +695,7 @@ The rest of this section describes the **`range`** coder.
 
 ## 10. Benchmark methodology (`bench/prmdbench.cpp`)
 
-- **Input:** the user's JPEG (`test_image.jpg`, 8824×5336 RGB aerial photo), center-cropped to 4096², N = 5. Gray8 is the primary run (`bench/results.md`). An RGB8 run uses fewer codecs and iterations (`bench/results_rgb.md`).
+- **Input:** the user's JPEG (`test_image.jpg`, 8824×5336 RGB aerial photo), center-cropped to 4096², N = 5. Gray8 is the primary run (`--out bench/results.md`). An RGB8 run uses fewer codecs and iterations (`--out bench/results_rgb.md`). Both reports are regenerated output and are not tracked in git.
 - **Entropy coders:** for `haar`, `cdf53` and `naive`, one table comparing `zstd` 19 (default), `zstd` 3, `range` and `raw`: file size, size vs zstd 19, size vs naive *under the same coder*, mean and p95 latency for 256² crops at L0 and 512² at L1. `raw` approximates the non-entropy share of decode time. All other tables use the default coder (zstd 19).
 - **Sizes:** each codec's file size against raw L0 (16 MiB gray / 48 MiB RGB) and the raw pyramid (≈21.3 / 64 MiB), plus per-level bytes. PNG-per-256-tile is included as a size-only reference.
 - **Latency:**
@@ -707,7 +707,7 @@ The rest of this section describes the **`range`** coder.
 - **Trajectory:** a 1000-step random walk of 256² crops at L0 with the cache on, for the `.prmd` modes.
 - **Reference rows:** full-level decode of L0–L2 (what a crop costs without random access).
 - **Lossy** (`--lossy`): `.prmd` haar, cdf53 and laplacian-gauss at quant 2/4/8 with the default coder (plus cdf53+range at quant 4) against J2K 9/7 at PSNR targets 50/45/40/35 dB. Reports size, bits/px, PSNR at L0 vs the source, PSNR at L2 vs the codec's own lossless L2 (n/a for J2K, whose 9/7 levels differ from its 5/3 levels), max |error| at L0, and L0 crop latency.
-- **Level quality:** PSNR of each mode's levels against the `haar` 2×2-mean pyramid, plus sample PNGs of level 3 saved for visual aliasing comparison.
+- **Level quality:** PSNR of each mode's levels against the `haar` 2×2-mean pyramid. One sample PNG of level 3 (centre 256²) is saved per *level definition* (`haar`, `box`, `gauss`, `cdf53`, and each J2K tiling) for visual aliasing comparison. Codecs that share a definition decode identical levels. J2K tilings count separately, because J2K transforms each tile with symmetric extension at tile borders.
 - **Output:** markdown tables on stdout and in `bench/results.md`, plus the build flags and CPU model.
 
 ---
@@ -741,7 +741,7 @@ tools/prmd_cli.cpp             → executable `prmd` (library target: `prmd_core
 bench/prmdbench.cpp
 tests/                         reference.{h,cpp} test_util.h test_image.cpp test_rangecoder.cpp
                                test_transform.cpp test_blockcoder.cpp test_codec.cpp test_j2k.cpp
-bench/results.md, results_rgb.md, samples/   committed benchmark output
+bench/samples/                 level-3 sample per level definition (tracked; reports bench/results*.md are not)
 docs/DESIGN.md                 this document
 docs/WRITEUP.md                1–2 page results write-up (after the benchmark)
 ```
