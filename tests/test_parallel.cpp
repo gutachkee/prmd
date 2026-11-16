@@ -1,5 +1,5 @@
-// Thread pool (include/prmd/internal/parallel.h): thread-count resolution,
-// coverage of [0, n), inline execution,
+// Thread pool (include/prmd/internal/parallel.h): thread-count resolution
+// and the automatic count, coverage of [0, n), inline execution,
 // lowest-index exception, reuse, nesting, the fewer-threads fallback when
 // workers cannot be started, and row stripes on worker threads.
 
@@ -20,14 +20,18 @@
 
 #include "prmd/internal/parallel.h"
 
+using prmd::internal::auto_threads;
+using prmd::internal::choose_threads;
 using prmd::internal::kChunkSamples;
 using prmd::internal::kMaxThreads;
 using prmd::internal::kMinParallelSamples;
+using prmd::internal::kAutoWorkGrain;
 using prmd::internal::parallel_for;
 using prmd::internal::parallel_rows;
 using prmd::internal::parallel_samples;
 using prmd::internal::Pool;
 using prmd::internal::resolve_threads;
+using prmd::internal::validate_threads;
 namespace test_hooks = prmd::internal::test_hooks;
 
 namespace {
@@ -80,6 +84,71 @@ TEST(ResolveThreads, NegativeIsRejected) {
   EXPECT_THROW(resolve_threads(-1, 8), std::invalid_argument);
   EXPECT_THROW(resolve_threads(INT_MIN, 8), std::invalid_argument);
   EXPECT_THROW(resolve_threads(-1), std::invalid_argument);
+}
+
+TEST(ResolveThreads, ValidateRejectsOnlyNegatives) {
+  EXPECT_NO_THROW(validate_threads(0));
+  EXPECT_NO_THROW(validate_threads(1));
+  EXPECT_NO_THROW(validate_threads(INT_MAX));
+  EXPECT_THROW(validate_threads(-1), std::invalid_argument);
+  EXPECT_THROW(validate_threads(INT_MIN), std::invalid_argument);
+  try {
+    validate_threads(-3);
+  } catch (const std::invalid_argument& e) {
+    EXPECT_STREQ(e.what(), "threads must be >= 0 (0 = automatic)");
+  }
+}
+
+TEST(AutoThreads, NThreadsFromNSquaredGrainsOfWork) {
+  // A pure function of (work, hardware): deterministic for every image.
+  const uint64_t g = kAutoWorkGrain;
+  EXPECT_EQ(auto_threads(0, 14), 1);
+  EXPECT_EQ(auto_threads(1, 14), 1);
+  EXPECT_EQ(auto_threads(4 * g - 1, 14), 1);  // below 2 threads' worth
+  EXPECT_EQ(auto_threads(4 * g, 14), 2);
+  EXPECT_EQ(auto_threads(9 * g - 1, 14), 2);
+  EXPECT_EQ(auto_threads(9 * g, 14), 3);
+  EXPECT_EQ(auto_threads(25 * g + 7, 14), 5);
+  EXPECT_EQ(auto_threads(195 * g, 14), 13);
+  EXPECT_EQ(auto_threads(196 * g, 14), 14);
+  EXPECT_EQ(auto_threads(100000 * g, 14), 14);
+  EXPECT_EQ(auto_threads(UINT64_MAX, 14), 14);
+  // Never more than the hardware, nor than kMaxThreads; unknown hardware
+  // (0) is serial.
+  EXPECT_EQ(auto_threads(UINT64_MAX, 1), 1);
+  EXPECT_EQ(auto_threads(UINT64_MAX, 0), 1);
+  EXPECT_EQ(auto_threads(UINT64_MAX, 100000), kMaxThreads);
+  EXPECT_EQ(auto_threads(100 * g, 2), 2);
+  // Exact square roots over a wide range, and monotone in the work.
+  int prev = 1;
+  for (uint64_t w = 0; w < 300 * 300 * g; w += g / 3 + w / 50) {
+    const int t = auto_threads(w, 1000);
+    uint64_t r = 1;
+    while ((r + 1) * (r + 1) * g <= w) {
+      ++r;
+    }
+    ASSERT_EQ(t, int(std::min<uint64_t>(r, kMaxThreads))) << w;
+    ASSERT_GE(t, prev) << w;
+    prev = t;
+  }
+}
+
+TEST(AutoThreads, ChooseThreadsTreatsOnlyZeroAsAutomatic) {
+  const uint64_t tiny = 10;
+  const uint64_t huge = 1000 * 1000 * kAutoWorkGrain;
+  EXPECT_EQ(choose_threads(0, tiny, 14), 1);
+  EXPECT_EQ(choose_threads(0, huge, 14), 14);
+  EXPECT_EQ(choose_threads(0, huge, 14), auto_threads(huge, 14));
+  // Explicit counts are honoured whatever the work (an upper bound that
+  // callers cap by their units of work), clamped to kMaxThreads.
+  EXPECT_EQ(choose_threads(1, huge, 14), 1);
+  EXPECT_EQ(choose_threads(5, tiny, 14), 5);
+  EXPECT_EQ(choose_threads(64, tiny, 8), 64);
+  EXPECT_EQ(choose_threads(INT_MAX, tiny, 8), kMaxThreads);
+  EXPECT_THROW(choose_threads(-1, huge, 14), std::invalid_argument);
+  const unsigned hw = std::thread::hardware_concurrency();
+  EXPECT_EQ(choose_threads(0, huge), auto_threads(huge, hw));
+  EXPECT_LE(choose_threads(0, UINT64_MAX), std::max(1, int(hw)));
 }
 
 TEST(Pool, SizeCountsTheCaller) {

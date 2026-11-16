@@ -20,6 +20,7 @@
 #include "prmd/encoder.h"
 #include "prmd/errors.h"
 #include "prmd/image_io.h"
+#include "prmd/internal/parallel.h"
 #include "prmd/internal/prmd_format.h"
 
 using namespace prmd;
@@ -164,8 +165,10 @@ EncodeOptions parse_encode_options(const Args& a) {
   o.entropy_level = a.num("entropy-level", 0);
   o.j2k_tile = a.num("j2k-tile", 256);
   o.threads = a.num("threads", 0);
-  if (o.threads < 0) {
-    throw UsageError("--threads must be >= 0 (0 = one per hardware thread)");
+  try {
+    internal::validate_threads(o.threads);
+  } catch (const std::invalid_argument& e) {
+    throw UsageError(std::string("--") + e.what());
   }
 
   o.color = parse_choice<ColorFormat>(

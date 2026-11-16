@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -48,11 +49,14 @@ void set_row_stripe_observer(RowStripeObserver observer) {
 }
 }  // namespace test_hooks
 
-int resolve_threads(int requested, unsigned hardware) {
+void validate_threads(int requested) {
   if (requested < 0) {
-    throw std::invalid_argument(
-        "threads must be >= 0 (0 = one per hardware thread)");
+    throw std::invalid_argument("threads must be >= 0 (0 = automatic)");
   }
+}
+
+int resolve_threads(int requested, unsigned hardware) {
+  validate_threads(requested);
   long n = requested;
   if (n == 0) {
     n = hardware == 0 ? 1 : long(std::min<unsigned>(hardware, kMaxThreads));
@@ -62,6 +66,30 @@ int resolve_threads(int requested, unsigned hardware) {
 
 int resolve_threads(int requested) {
   return resolve_threads(requested, std::thread::hardware_concurrency());
+}
+
+int auto_threads(uint64_t work, unsigned hardware) {
+  const uint64_t cap = uint64_t(resolve_threads(0, hardware));
+  const uint64_t q = work / kAutoWorkGrain;
+  // floor(sqrt(q)), exact for every uint64_t.
+  uint64_t r = uint64_t(std::sqrt(double(q)));
+  while (r > 0 && r * r > q) {
+    --r;
+  }
+  while ((r + 1) * (r + 1) <= q && r + 1 <= cap) {
+    ++r;
+  }
+  return int(std::clamp<uint64_t>(r, 1, cap));
+}
+
+int choose_threads(int requested, uint64_t work, unsigned hardware) {
+  validate_threads(requested);
+  return requested == 0 ? auto_threads(work, hardware)
+                        : resolve_threads(requested, hardware);
+}
+
+int choose_threads(int requested, uint64_t work) {
+  return choose_threads(requested, work, std::thread::hardware_concurrency());
 }
 
 // Synchronization. The job (fn, n, grain, next, cancel) is written by the

@@ -51,6 +51,56 @@ struct EncodedBlocks {
 // code-blocks), not kept for the thread's lifetime.
 constexpr size_t kMaxKeptScratch = size_t(8) << 20;
 
+// Relative serial cost per level-0 sample and channel, in 1/kWeightOne of a
+// gray haar + zstd-1 sample (the work unit of parallel.h, auto_threads).
+// Measured at one thread on centre crops of test_image.jpg, 14-core host
+// (docs/benchmarks.md, "Automatic thread count"); it only needs to be right
+// within a factor of about 1.5, as the automatic count follows the square
+// root of the work.
+constexpr unsigned kWeightOne = 16;
+
+unsigned work_weight(const EncodeOptions& o) {
+  unsigned w = 0;
+  switch (o.transform) {
+    case Transform::Haar:
+      w = 16;
+      break;
+    case Transform::Cdf53:
+      w = 20;
+      break;
+    case Transform::Laplacian:
+      w = o.downsampler == Downsampler::Gauss ? 40 : 30;
+      break;
+    case Transform::Independent:
+      w = o.downsampler == Downsampler::Gauss ? 30 : 23;
+      break;
+  }
+  if (prmd::channels(o.color) == 3) {
+    w += 4;  // YCoCg-R, and the colour conversion of a gray source
+  }
+  if (o.quant > 0) {
+    w += 6;
+  }
+  switch (o.entropy) {
+    case Entropy::Range:
+      w += 85;  // ~65 (RGB) to ~100 (gray)
+      break;
+    case Entropy::Raw:
+      break;
+    case Entropy::Zstd: {
+      // Extra cost of zstd level L over level 1 (measured at 1, 2, 3, 5, 7,
+      // 9, 12, 15, 17, 19, 22; RGB about twice gray at the high levels).
+      static const unsigned kZstdExtra[23] = {
+          0,   0,   0,   2,   6,   18,  20,  22,  26,  40,  46,  52,
+          60,  90,  120, 150, 190, 230, 300, 400, 500, 700, 1200};
+      const int level = o.entropy_level == 0 ? 1 : o.entropy_level;
+      w += kZstdExtra[std::clamp(level, 0, 22)];
+      break;
+    }
+  }
+  return w;
+}
+
 Samples extract(const Region& plane, const Rect& r) {
   Samples out = uninitialized_samples(size_t(r.w) * size_t(r.h));
   for (int y = 0; y < r.h; ++y) {
@@ -518,10 +568,16 @@ void validate_prmd_options(const EncodeOptions& o) {
   }
   (void)make_block_coder(o.entropy, o.entropy_level);  // entropy + level
   (void)info(o.color);
-  if (o.threads < 0) {
-    throw std::invalid_argument(
-        "threads must be >= 0 (0 = one per hardware thread)");
+  validate_threads(o.threads);
+}
+
+uint64_t prmd_work_units(int width, int height, const EncodeOptions& o) {
+  if (width <= 0 || height <= 0) {
+    return 0;
   }
+  return uint64_t(width) * uint64_t(height) *
+         uint64_t(prmd::channels(o.color)) * uint64_t(work_weight(o)) /
+         kWeightOne;
 }
 
 EncodeReport encode_prmd(const Image& src,
@@ -555,11 +611,25 @@ EncodeReport encode_prmd(const Image& src,
     present_blocks += uint64_t(g.blocks_x) * uint64_t(g.blocks_y);
   }
 
-  // Threads: never more than there are blocks, the unit of the dominant
-  // stage (an image with one block gets no pool). One thread: no pool, every
-  // stage runs inline on this thread.
+  // Threads: `opts.threads`, or for 0 as many as the amount of work makes
+  // worthwhile (auto_threads), never more than there are blocks, the unit of
+  // the dominant stage (an image with one block gets no pool). The
+  // automatic count is also capped by the level-0 blocks: they are most of
+  // the coding, and a block cannot be split, so for a small image with fewer
+  // level-0 blocks than threads (a 128² image has one) the extra threads
+  // cost more to start than they save (with the slow coders too). One
+  // thread: no pool, every stage runs inline on this thread.
+  uint64_t max_useful = std::max<uint64_t>(present_blocks, 1);
+  if (opts.threads == 0) {
+    max_useful = std::min<uint64_t>(
+        max_useful,
+        std::max<uint64_t>(uint64_t(geom[0].blocks_x) * uint64_t(geom[0].blocks_y),
+                           1));
+  }
   const int threads = int(std::min<uint64_t>(
-      uint64_t(resolve_threads(opts.threads)), std::max<uint64_t>(present_blocks, 1)));
+      uint64_t(choose_threads(opts.threads,
+                              prmd_work_units(src.width, src.height, opts))),
+      max_useful));
   std::unique_ptr<Pool> pool_owner;
   if (threads > 1) {
     pool_owner = std::make_unique<Pool>(threads);

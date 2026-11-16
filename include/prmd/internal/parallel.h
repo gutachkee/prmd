@@ -28,6 +28,7 @@
 // in the order a serial loop would have created them (see prmd/profile.h).
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -35,12 +36,42 @@ namespace prmd::internal {
 
 constexpr int kMaxThreads = 256;
 
-// Thread count for EncodeOptions::threads = `requested`: 0 means
-// `hardware` (std::thread::hardware_concurrency(); 1 if that is 0, i.e.
-// unknown), positive values are used as given; the result is clamped to
+// Throws std::invalid_argument for EncodeOptions::threads < 0 (the one check
+// shared by the .prmd and J2K encoders and the tools).
+void validate_threads(int requested);
+
+// Upper bound on the threads of an encode for EncodeOptions::threads =
+// `requested`: 0 (automatic) means `hardware`
+// (std::thread::hardware_concurrency(); 1 if that is 0, i.e. unknown),
+// positive values are used as given; the result is clamped to
 // [1, kMaxThreads]. Throws std::invalid_argument for requested < 0.
 int resolve_threads(int requested, unsigned hardware);
 int resolve_threads(int requested);  // hardware = hardware_concurrency()
+
+// Automatic thread count (EncodeOptions::threads = 0) for an encode of
+// `work` work units: n threads once the work reaches n² × kAutoWorkGrain,
+// i.e. floor(sqrt(work / kAutoWorkGrain)), at least 1, at most
+// resolve_threads(0, hardware). A pure function, so the choice is
+// deterministic for a given image, options and host.
+//
+// A work unit is the encoder's serial time for one level-0 sample of a gray
+// haar + zstd-1 encode (about 4.3 ns on the calibration host); slower modes
+// and coders weigh their samples more (prmd_work_units() in prmd_codec.h,
+// the J2K backend in j2k_codec.cpp). Calibrated on a 14-core host
+// (docs/benchmarks.md, "Automatic thread count"): a thread costs about
+// 0.1-0.2 ms to start, join and feed, and the stages that bound memory
+// bandwidth gain less from each added thread, so the best count grows with
+// the square root of the work rather than linearly. Below 4 × kAutoWorkGrain
+// (about 0.56 ms of serial work) one thread is used and no thread started.
+constexpr uint64_t kAutoWorkGrain = uint64_t(1) << 15;  // 32 Ki units
+int auto_threads(uint64_t work, unsigned hardware);
+
+// The thread count of an encode: requested == 0 → auto_threads(work,
+// hardware); requested > 0 → resolve_threads(requested, hardware) (an upper
+// bound honoured as given, clamped to kMaxThreads). Callers cap it further
+// by their unit of work (code-blocks). Throws for requested < 0.
+int choose_threads(int requested, uint64_t work, unsigned hardware);
+int choose_threads(int requested, uint64_t work);  // hardware_concurrency()
 
 class Pool {
  public:

@@ -353,7 +353,7 @@ Encoded encode_case(const Case& c, int threads, const std::string& tag) {
 }
 
 // Thread counts beyond 1: odd counts, more threads than this machine has, 0
-// (hardware), and more threads than any case has blocks.
+// (automatic), and more threads than any case has blocks.
 const int kThreadCounts[] = {2, 3, 7, 16, 0, 1000};
 
 class ThreadMatrixTest : public ::testing::TestWithParam<size_t> {
@@ -438,8 +438,10 @@ TEST(Threads, ReportCountsTheThreadsUsed) {
   EXPECT_EQ(encode_case(c, 1, "r1").report.threads, 1);
   EXPECT_EQ(encode_case(c, 2, "r2").report.threads, 2);
   EXPECT_EQ(encode_case(c, 7, "r7").report.threads, 7);
-  EXPECT_EQ(encode_case(c, 0, "r0").report.threads,
-            std::min(internal::resolve_threads(0), blocks));
+  // Automatic: 60 000 work units are below two threads' worth.
+  ASSERT_LT(internal::prmd_work_units(c.w, c.h, c.opts),
+            4 * internal::kAutoWorkGrain);
+  EXPECT_EQ(encode_case(c, 0, "r0").report.threads, 1);
   // Clamped to the block count, which is below kMaxThreads here.
   EXPECT_EQ(encode_case(c, 1000, "r1000").report.threads, blocks);
   EXPECT_EQ(encode_case(c, INT_MAX, "rmax").report.threads, blocks);
@@ -499,10 +501,55 @@ TEST(Threads, NegativeIsRejectedBeforeAnyFileIsWritten) {
   EXPECT_NO_THROW(internal::validate_prmd_options(o));
 }
 
-TEST(Threads, DefaultIsHardwareConcurrency) {
+TEST(Threads, DefaultIsAutomatic) {
   EXPECT_EQ(EncodeOptions{}.threads, 0);
   EXPECT_EQ(EncodeReport{}.threads, 1);
 }
+
+TEST(ThreadsAuto, WorkUnitsGrowWithSizeChannelsAndCost) {
+  EncodeOptions o;
+  const uint64_t gray = internal::prmd_work_units(1000, 1000, o);
+  EXPECT_EQ(gray, 1000000u);  // the unit: one gray haar + zstd-1 sample
+  EXPECT_EQ(internal::prmd_work_units(2000, 1000, o), 2 * gray);
+  EXPECT_EQ(internal::prmd_work_units(0, 1000, o), 0u);
+  o.color = ColorFormat::RGB8;  // 3 channels, each a little dearer (YCoCg-R)
+  EXPECT_GT(internal::prmd_work_units(1000, 1000, o), 3 * gray);
+  EXPECT_LT(internal::prmd_work_units(1000, 1000, o), 4 * gray);
+  o.color = ColorFormat::Gray8;
+  // Slower modes and coders weigh more, so they get threads at smaller
+  // sizes.
+  EncodeOptions cdf = o;
+  cdf.transform = Transform::Cdf53;
+  EncodeOptions lap = o;
+  lap.transform = Transform::Laplacian;
+  EncodeOptions range = o;
+  range.entropy = Entropy::Range;
+  EncodeOptions z19 = o;
+  z19.entropy_level = 19;
+  EXPECT_GT(internal::prmd_work_units(1000, 1000, cdf), gray);
+  EXPECT_GT(internal::prmd_work_units(1000, 1000, lap), gray);
+  EXPECT_GT(internal::prmd_work_units(1000, 1000, range), 3 * gray);
+  EXPECT_GT(internal::prmd_work_units(1000, 1000, z19),
+            internal::prmd_work_units(1000, 1000, range));
+  EncodeOptions z3 = o;
+  z3.entropy_level = 3;
+  EXPECT_GE(internal::prmd_work_units(1000, 1000, z3), gray);
+  EXPECT_LE(internal::prmd_work_units(1000, 1000, z3),
+            internal::prmd_work_units(1000, 1000, z19));
+}
+
+TEST(ThreadsAuto, ChoiceIsAPureFunctionOfTheWork) {
+  const Case c = case_named("haar_1000x777_rgb");
+  const uint64_t work = internal::prmd_work_units(c.w, c.h, c.opts);
+  const int blocks = present_blocks(c);
+  const int expected =
+      std::min(internal::choose_threads(0, work), blocks);
+  for (int rep = 0; rep < 3; ++rep) {
+    EXPECT_EQ(encode_case(c, 0, "auto" + std::to_string(rep)).report.threads,
+              expected);
+  }
+}
+
 
 // ----------------------------------------------------------------------------
 // Row-parallel building blocks equal their serial versions
@@ -1000,6 +1047,58 @@ TEST(ThreadsSerial, OneThreadStartsNoThreadAndMatchesTheGoldenFile) {
     EXPECT_EQ(serial.max_threads(), before);
     EXPECT_EQ(mt.max_threads(), before + 3);
     EXPECT_EQ(process_threads(), before);
+  }
+}
+
+TEST(ThreadsAuto, SmallImagesStartNoThread) {
+  // Automatic on small images: one thread, no thread started, the serial
+  // file.
+  for (const char* name : {"haar_100x100_rgb", "cdf53_300x200_gray",
+                           "lapgauss_257x129_gray", "naive_100x100_rgb"}) {
+    const Case c = case_named(name);
+    EncodeOptions o = c.opts;
+    o.threads = 0;
+    ASSERT_EQ(internal::choose_threads(0, internal::prmd_work_units(c.w, c.h, o)),
+              1)
+        << name;
+    const std::string path = testutil::temp_path("auto_small.prmd").string();
+    const ThreadRecordingCoder coder;
+    const int before = process_threads();
+    const EncodeReport r = internal::encode_prmd(source_of(c), path, o, &coder);
+    EXPECT_EQ(r.threads, 1) << name;
+    EXPECT_EQ(file_hash(path), golden().at(c.name)) << name;
+    EXPECT_EQ(coder.ids(),
+              std::set<std::thread::id>{std::this_thread::get_id()});
+    if (before > 0) {
+      EXPECT_EQ(coder.max_threads(), before) << name;
+    }
+  }
+}
+
+TEST(ThreadsAuto, LargeImagesUseSeveralThreadsAndTheSameFile) {
+  const unsigned hw = std::thread::hardware_concurrency();
+  const Image src = ref::synthetic_image(2400, 1800, ColorFormat::RGB8, 21);
+  for (const Transform t : {Transform::Haar, Transform::Laplacian}) {
+    EncodeOptions o;
+    o.color = ColorFormat::RGB8;
+    o.transform = t;
+    o.levels = 5;
+    const uint64_t work = internal::prmd_work_units(src.width, src.height, o);
+    ASSERT_GE(work, 64 * internal::kAutoWorkGrain);
+    const std::string p1 = testutil::temp_path("auto_l1.prmd").string();
+    const std::string p0 = testutil::temp_path("auto_l0.prmd").string();
+    o.threads = 1;
+    encode_file(src, p1, Codec::Prmd, o);
+    o.threads = 0;
+    const EncodeReport r = encode_file(src, p0, Codec::Prmd, o);
+    EXPECT_EQ(r.threads, internal::choose_threads(0, work)) << to_string(t);
+    EXPECT_LE(r.threads, std::max(1, int(hw)));
+    if (hw > 1) {
+      EXPECT_GT(r.threads, 1) << to_string(t);
+    }
+    EXPECT_EQ(testutil::read_file(p0), testutil::read_file(p1)) << to_string(t);
+    std::filesystem::remove(p0);
+    std::filesystem::remove(p1);
   }
 }
 

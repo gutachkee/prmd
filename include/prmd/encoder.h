@@ -62,9 +62,12 @@ struct EncodeOptions {
   // they are. Ignored for gray, which has no color transform.
   bool ycocg = true;
 
-  // Encoder threads (.prmd and J2K). 0 = one per hardware thread
-  // (std::thread::hardware_concurrency(), 1 if unknown); 1 = serial, on the
-  // calling thread, no thread is started; N > 1 = a pool of N threads (the
+  // Encoder threads (.prmd and J2K). 0 = automatic: the library chooses per
+  // image from the amount of work (pixels × channels, weighted by the cost
+  // of the mode and coder; n threads for about n² × 0.14 ms of serial work),
+  // up to std::thread::hardware_concurrency() (1 if unknown), so small
+  // images encode serially with no thread started (design.md §1.4); 1 = serial, on
+  // the calling thread, no thread is started; N > 1 = at most N threads (the
   // caller and N - 1 workers) for the duration of the call. Negative values
   // are rejected; values above 256 are clamped to 256, and .prmd never uses
   // more threads than the image has code-blocks. A .prmd file is
@@ -83,8 +86,9 @@ struct EncodeReport {
   // Payload bytes attributed to each level.
   std::array<uint64_t, kMaxLevels> level_bytes{};
   double encode_ms = 0;
-  // Threads the encode actually ran on (after resolving 0 and clamping),
-  // the calling thread included; 1 for a serial encode.
+  // Threads the encode actually ran on (after the automatic choice for 0,
+  // the caps, and any thread the system refused to start), the calling
+  // thread included; 1 for a serial encode.
   int threads = 1;
 };
 

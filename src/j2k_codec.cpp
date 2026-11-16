@@ -403,11 +403,19 @@ void validate_j2k_options(const EncodeOptions& o) {
   if (!o.j2k_lossless && o.j2k_psnr <= 0) {
     throw std::invalid_argument("lossy J2K needs j2k_psnr > 0");
   }
-  if (o.threads < 0) {
-    throw std::invalid_argument(
-        "threads must be >= 0 (0 = one per hardware thread)");
-  }
+  validate_threads(o.threads);
 }
+
+// Automatic thread count (EncodeOptions::threads = 0): auto_threads of the
+// work, measured like the .prmd encoder's (parallel.h). An OpenJPEG sample
+// costs about 18 work units serially (lossless or lossy), but each thread of
+// OpenJPEG's own pool costs about 8 times what one of the .prmd pool does
+// (it starts its threads per codec and splits per tile: 2 threads make a
+// 128² gray encode 1.7x slower), so only an eighth of the work counts:
+// 2 threads from ~5 ms of serial work, 4 (the 256²-tile cap) from ~18 ms
+// (docs/benchmarks.md, "Automatic thread count").
+constexpr uint64_t kJ2kWorkPerSample = 18;
+constexpr uint64_t kJ2kThreadCost = 8;
 
 opj_cparameters_t make_encoder_params(const EncodeOptions& o, int channels) {
   opj_cparameters_t p;
@@ -499,9 +507,13 @@ EncodeReport encode_j2k(const Image& src_in,
   // (on test_image.jpg with 256² tiles, 4 threads encode 2.3× faster than
   // 1 and 14 threads only 1.2×): use at most one thread per 4 code-blocks of
   // a tile. A library without thread support refuses: encode on this thread.
+  // threads = 0: auto_threads of the work, as for .prmd.
   const int64_t blocks_per_tile =
       int64_t(o.j2k_tile / o.j2k_cblk) * int64_t(o.j2k_tile / o.j2k_cblk);
-  int threads = int(std::min<int64_t>(resolve_threads(o.threads),
+  const uint64_t work = uint64_t(src.width) * uint64_t(src.height) *
+                        uint64_t(src.channels()) * kJ2kWorkPerSample /
+                        kJ2kThreadCost;
+  int threads = int(std::min<int64_t>(choose_threads(o.threads, work),
                                       std::max<int64_t>(blocks_per_tile / 4, 1)));
   if (threads > 1 && !opj_codec_set_threads(codec.get(), threads)) {
     threads = 1;
