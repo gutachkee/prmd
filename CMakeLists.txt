@@ -65,6 +65,9 @@ target_link_libraries(prmd PRIVATE prmd_core)
 
 add_executable(prmdbench bench/prmdbench.cpp)
 target_link_libraries(prmdbench PRIVATE prmd_core)
+# Default --out: reports and samples stay in this build directory.
+target_compile_definitions(prmdbench PRIVATE
+  PRMD_BENCH_OUT_DIR="${CMAKE_BINARY_DIR}/bench")
 
 add_executable(prmdpipeline tools/prmd_pipeline.cpp)
 target_link_libraries(prmdpipeline PRIVATE prmd_core)

@@ -211,7 +211,7 @@ Here is the same 64×64 patch of level 3 for each definition, zoomed 4×. `naive
 | ![haar](img/L3_zoom_haar.png) | ![cdf53](img/L3_zoom_cdf53.png) | ![box](img/L3_zoom_box.png) | ![gauss](img/L3_zoom_gauss.png) |
 | exact 2×2 mean | sharpest, slight ringing | ≈ `haar` (rounding differs by 1) | smoothest, least aliasing |
 
-The full 256² samples are in [`bench/samples/`](../bench/samples/). `prmdbench` regenerates them.
+`prmdbench` writes the full 256² samples to `build/bench/samples/` (git-ignored; see the README).
 
 **PSNR against the `haar` 2×2-mean pyramid** (higher means closer):
 

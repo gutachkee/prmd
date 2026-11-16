@@ -3,10 +3,18 @@
 //
 // usage: prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096]
 //                  [--color gray|rgb|both] [--codecs a,b,...]
-//                  [--out bench/results.md] [--workdir DIR]
+//                  [--out <build dir>/bench/results.md] [--workdir DIR]
 //                  [--no-entropy-table] [--lossy]
+//
+// Everything the run produces goes next to --out: the report itself and the
+// level-3 sample PNGs in <dir of --out>/samples/. The default --out is in the
+// CMake build directory (PRMD_BENCH_OUT_DIR), which git ignores.
 
 #include <unistd.h>
+
+#ifndef PRMD_BENCH_OUT_DIR
+#define PRMD_BENCH_OUT_DIR "bench_out"  // built outside CMake
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -265,7 +273,7 @@ std::string cpu_model() {
 
 struct Args {
   std::string image;
-  std::string out = "bench/results.md";
+  std::string out = PRMD_BENCH_OUT_DIR "/results.md";
   std::string workdir;
   std::string color = "gray";
   int levels = 5;
@@ -329,7 +337,7 @@ Args parse(int argc, char** argv) {
                  "usage: prmdbench <image> [--levels 5] [--iters 300] [--seed "
                  "1] [--size 4096]\n"
                  "                 [--color gray|rgb|both] [--codecs a,b,...] "
-                 "[--out bench/results.md]\n"
+                 "[--out " PRMD_BENCH_OUT_DIR "/results.md]\n"
                  "                 [--workdir DIR] [--no-entropy-table] "
                  "[--lossy]\n");
     std::exit(1);

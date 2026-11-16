@@ -11,10 +11,11 @@ compile_commands.json
 *.swp
 .DS_Store
 
-# Files produced by the CLI and benchmark (committed results live in bench/)
+# Files produced by the CLI and benchmark
 *.prmd
 *.j2k
 crop*.png
 
-# Benchmark reports (regenerate with prmdbench; see README)
-bench/results*.md
+# Benchmark output: prmdbench writes reports and level samples to <build dir>/bench/
+# (covered by build/ above); bench_out/ is its fallback when built without CMake.
+bench_out/

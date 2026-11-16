@@ -22,9 +22,9 @@ sudo apt install build-essential cmake pkg-config \
      libjpeg62-turbo-dev libpng-dev libzstd-dev libopenjp2-7-dev libgtest-dev
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j4
 ctest --test-dir build -j4
-build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --out bench/results.md
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy
 build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
-                --codecs haar,cdf53,naive,j2k-t256,haar+range --out bench/results_rgb.md
+                --codecs haar,cdf53,naive,j2k-t256,haar+range --out build/bench/results_rgb.md
 ```
 
 ## Summary

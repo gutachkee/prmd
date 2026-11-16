@@ -101,9 +101,9 @@ prmd::DecodeResult r = dec->decode(2, {100, 50, 256, 256});
 ## Benchmark
 
 ```sh
-build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --out bench/results.md
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy
 build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
-                --codecs haar,cdf53,naive,j2k-t256,haar+range --out bench/results_rgb.md
+                --codecs haar,cdf53,naive,j2k-t256,haar+range --out build/bench/results_rgb.md
 ```
 
 It reports file sizes (vs raw and vs naive), mean/p50/p95 latency for random 256² and 512² crops
@@ -112,8 +112,9 @@ at every level, tiles touched, blocks decoded and bytes read per crop, an entrop
 a cached random-walk trajectory, full-level decode times, and PSNR of each codec's levels against
 the plain 2×2-mean pyramid.
 
-The reports (`bench/results*.md`) are build output and are not tracked in git. The run also writes
-`bench/samples/`, which is tracked: the centre 256² of level 3, saved **once per level definition**
+All benchmark output goes to the build directory, which is not tracked in git. The default
+`--out` is `<build dir>/bench/results.md` (here `build/bench/results.md`), and the samples go next
+to the report in `build/bench/samples/`: the centre 256² of level 3, saved **once per level definition**
 (`haar`, `box`, `gauss`, `cdf53`, and each JPEG2000 tiling), for comparing aliasing and blur by eye.
 Codecs that share a definition, such as `naive` and `laplacian-box`, or a mode under any entropy
 coder, decode identical levels. JPEG2000 runs its 5/3 transform per tile, so its levels differ
