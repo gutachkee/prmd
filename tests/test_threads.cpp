@@ -711,6 +711,44 @@ TEST(ParallelTransforms, RowStripesRunOnWorkerThreads) {
             std::set<std::thread::id>{std::this_thread::get_id()});
 }
 
+TEST(SampleAllocator, OnlyTheInitialElementsAreLeftUninitialized) {
+  using internal::Samples;
+  Samples a = internal::uninitialized_samples(1000);
+  EXPECT_EQ(a.size(), 1000u);
+  EXPECT_TRUE(a.get_allocator().zeroes());
+  for (auto& v : a) {
+    v = -1;
+  }
+  a.resize(5000);  // the added elements are zeroed
+  for (size_t i = 1000; i < a.size(); ++i) {
+    ASSERT_EQ(a[i], 0) << i;
+  }
+  // Move construction and move assignment do not carry "no zero" over.
+  Samples b = internal::uninitialized_samples(64);
+  Samples moved(std::move(b));
+  EXPECT_TRUE(moved.get_allocator().zeroes());
+  Samples assigned;
+  assigned = internal::uninitialized_samples(64);
+  EXPECT_TRUE(assigned.get_allocator().zeroes());
+  assigned.resize(4096);
+  for (size_t i = 64; i < assigned.size(); ++i) {
+    ASSERT_EQ(assigned[i], 0) << i;
+  }
+  internal::Region r(Rect{0, 0, 30, 20}, internal::kNoInit);
+  EXPECT_TRUE(r.v.get_allocator().zeroes());
+  internal::Region q;
+  q = std::move(r);
+  q.v.resize(q.v.size() + 100);
+  for (size_t i = 600; i < q.v.size(); ++i) {
+    ASSERT_EQ(q.v[i], 0) << i;
+  }
+  // Plain vectors zero, as std::vector does.
+  Samples z(77);
+  for (const int32_t v : z) {
+    ASSERT_EQ(v, 0);
+  }
+}
+
 // ----------------------------------------------------------------------------
 // Multithreaded files decode exactly
 

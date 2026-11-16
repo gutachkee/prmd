@@ -2,6 +2,7 @@
 // A rectangle of int32 samples, addressed in the coordinates of the plane it
 // belongs to.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -13,13 +14,16 @@
 
 namespace prmd::internal {
 
-// std::allocator that can skip value-initialization. A vector created with
-// SampleAllocator<T>(false) leaves new elements uninitialized (resize, the
-// size constructor), so a large plane that a pass is about to overwrite
-// entirely is not zeroed first, and its pages are first touched by the
-// threads that write them. Default-constructed (and every copy-constructed)
-// vector zeroes new elements, exactly like std::vector<T>. All instances
-// compare equal: memory moves freely between vectors.
+// std::allocator that can skip value-initialization. A vector built with
+// SampleAllocator<T>(false) leaves new elements uninitialized, so a large
+// plane that a pass is about to overwrite entirely is not zeroed first, and
+// its pages are first touched by the threads that write them. Only
+// uninitialized_samples() builds one, and it returns the vector moved into
+// a zeroing one: a moved allocator (vector move construction and move
+// assignment) always zeroes, so every vector outside that function zeroes
+// the elements a later resize() adds, exactly like std::vector<T>. Copies
+// zero too. All instances compare equal: memory moves freely between
+// vectors.
 template <class T>
 class SampleAllocator : public std::allocator<T> {
  public:
@@ -32,10 +36,25 @@ class SampleAllocator : public std::allocator<T> {
 
   SampleAllocator() noexcept = default;
   explicit SampleAllocator(bool zero) noexcept : zero_(zero) {}
+  // A rebound allocator (vector internals) zeroes.
   template <class U>
-  SampleAllocator(const SampleAllocator<U>& o) noexcept : zero_(o.zero()) {}
+  SampleAllocator(const SampleAllocator<U>&) noexcept {}
+  // Kept by copy: vector(n, alloc) builds its elements with a copy.
+  SampleAllocator(const SampleAllocator&) noexcept = default;
+  // Moved allocators zero.
+  SampleAllocator(SampleAllocator&&) noexcept {}
+  SampleAllocator& operator=(const SampleAllocator&) noexcept {
+    zero_ = true;
+    return *this;
+  }
+  SampleAllocator& operator=(SampleAllocator&&) noexcept {
+    zero_ = true;
+    return *this;
+  }
 
-  bool zero() const noexcept { return zero_; }
+  // Whether new elements are zeroed (true for every vector the program
+  // holds; see above).
+  bool zeroes() const noexcept { return zero_; }
 
   // New elements: value- (zero) or default- (no) initialization.
   template <class U>
@@ -52,7 +71,7 @@ class SampleAllocator : public std::allocator<T> {
     ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
   }
 
-  // Copies zero-initialize again.
+  // Copies zero.
   SampleAllocator select_on_container_copy_construction() const noexcept {
     return SampleAllocator();
   }
@@ -75,9 +94,12 @@ bool operator!=(const SampleAllocator<T>&, const SampleAllocator<U>&) noexcept {
 using Samples = std::vector<int32_t, SampleAllocator<int32_t>>;
 
 // n samples with unspecified values: every one must be written before it is
-// read.
+// read. Elements added later (resize) are zeroed.
 inline Samples uninitialized_samples(size_t n) {
-  return Samples(n, SampleAllocator<int32_t>(false));
+  Samples v(n, SampleAllocator<int32_t>(false));
+  // Moving hands the buffer to a vector whose allocator zeroes: elements
+  // added later are zeroed.
+  return Samples(std::move(v));
 }
 
 // Tag for Region's uninitialized constructor.
