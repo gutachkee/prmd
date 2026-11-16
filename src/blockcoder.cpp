@@ -35,15 +35,13 @@ inline int32_t med_pred(const int32_t* px, int w, int x, int y) {
   const int32_t a = px[sample_index(x - 1, y, w)];
   const int32_t c = px[sample_index(x - 1, y - 1, w)];
 
+  // MED is the median of (a, b, a + b - c): c >= max(a, b) gives min(a, b),
+  // c <= min(a, b) gives max(a, b), otherwise a + b - c lies between them.
+  // Written as min/max so it compiles to conditional selects: the if/else
+  // form branches on image data, which the CPU mispredicts on fresh blocks.
   const int32_t mx = std::max(a, b);
   const int32_t mn = std::min(a, b);
-  if (c >= mx) {
-    return mn;
-  }
-  if (c <= mn) {
-    return mx;
-  }
-  return a + b - c;
+  return std::max(mn, std::min(mx, a + b - c));
 }
 
 }  // namespace

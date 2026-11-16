@@ -1,6 +1,5 @@
 #include "prmd/internal/prmd_format.h"
 
-#include <array>
 #include <cstring>
 #include <string>
 
@@ -42,18 +41,6 @@ uint32_t get32(const uint8_t* p) {
 
 uint64_t get64(const uint8_t* p) {
   return uint64_t(get32(p)) | (uint64_t(get32(p + 4)) << 32);
-}
-
-std::array<uint32_t, 256> make_crc_table() {
-  std::array<uint32_t, 256> t{};
-  for (uint32_t i = 0; i < 256; ++i) {
-    uint32_t c = i;
-    for (int k = 0; k < 8; ++k) {
-      c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-    }
-    t[i] = c;
-  }
-  return t;
 }
 
 // Field-range checks on a parsed header (ids are checked while parsing).
@@ -98,15 +85,6 @@ void check_level_table(const PrmdHeader& h,
 }
 
 }  // namespace
-
-uint32_t crc32(const uint8_t* data, size_t n, uint32_t crc) {
-  static const auto table = make_crc_table();
-  crc = ~crc;
-  for (size_t i = 0; i < n; ++i) {
-    crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
-  }
-  return ~crc;
-}
 
 std::vector<LevelGeom> make_geometry(int width,
                                      int height,
@@ -169,7 +147,6 @@ std::vector<uint8_t> serialize(PrmdHeader& h,
     at += kOffsetSize;
   }
 
-  h.index_crc32 = crc32(b.data() + kHeaderSize, index_size);
   h.data_offset = kHeaderSize + index_size;
 
   // Fixed header.
@@ -185,10 +162,9 @@ std::vector<uint8_t> serialize(PrmdHeader& h,
   put16(b, 20, h.cblk);
   put16(b, 22, h.quant);
   put32(b, 24, h.total_blocks);
-  put32(b, 28, h.index_crc32);
+  b[28] = uint8_t(h.entropy);
+  b[29] = h.entropy_level;
   put64(b, 32, h.data_offset);
-  b[40] = uint8_t(h.entropy);
-  b[41] = h.entropy_level;
   return b;
 }
 
@@ -226,14 +202,12 @@ PrmdHeader parse_header(const uint8_t* p, size_t n) {
   h.cblk = get16(p + 20);
   h.quant = get16(p + 22);
   h.total_blocks = get32(p + 24);
-  h.index_crc32 = get32(p + 28);
-  h.data_offset = get64(p + 32);
-
-  if (p[40] > uint8_t(Entropy::Raw)) {
+  if (p[28] > uint8_t(Entropy::Raw)) {
     throw FormatError("unknown entropy coder id");
   }
-  h.entropy = Entropy(p[40]);
-  h.entropy_level = p[41];
+  h.entropy = Entropy(p[28]);
+  h.entropy_level = p[29];
+  h.data_offset = get64(p + 32);
 
   validate_header(h);
   return h;
@@ -252,10 +226,6 @@ void parse_index(const PrmdHeader& h,
   if (n != index_bytes(h)) {
     throw FormatError("index size mismatch");
   }
-  if (crc32(buf, n) != h.index_crc32) {
-    throw FormatError("index CRC mismatch");
-  }
-
   const uint8_t* p = buf;
   levels.resize(h.levels);
   for (LevelEntry& l : levels) {

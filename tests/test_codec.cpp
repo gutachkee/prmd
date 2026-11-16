@@ -480,11 +480,12 @@ TEST(Format, RejectsCorruptHeadersAndIndex) {
   EXPECT_THROW(try_open(with_byte(0, 'X')), FormatError);  // magic
   EXPECT_THROW(try_open(with_byte(4, 9)), FormatError);    // version
   EXPECT_THROW(try_open(with_byte(17, 7)), FormatError);   // color id
-  EXPECT_THROW(try_open(with_byte(40, 9)), FormatError);   // entropy id
+  EXPECT_THROW(try_open(with_byte(28, 9)), FormatError);   // entropy id
 
+  // Level 0's width in the level table: must match the header's geometry.
   const size_t index_byte = internal::kHeaderSize + 3;
   EXPECT_THROW(try_open(with_byte(index_byte, char(good[index_byte] ^ 1))),
-               FormatError);  // index CRC
+               FormatError);  // level table
 
   std::vector<char> truncated(good.begin(), good.end() - 1);
   EXPECT_THROW(try_open(truncated), FormatError);  // truncated data

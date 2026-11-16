@@ -239,7 +239,7 @@ There are no public single-step `downsample_*` functions. For Cdf53 a level is n
 ```cpp
 namespace prmd {
 struct IoError     : std::runtime_error { using runtime_error::runtime_error; };  // open/read/write
-struct FormatError : std::runtime_error { using runtime_error::runtime_error; };  // bad magic/version/CRC/payload
+struct FormatError : std::runtime_error { using runtime_error::runtime_error; };  // bad magic/version/field values/index/payload
 // Bad level or rect: std::out_of_range. Bad EncodeOptions: std::invalid_argument.
 }
 ```
@@ -395,13 +395,12 @@ std::vector<LevelGeom> make_geometry(int width, int height, int levels, int tile
 uint32_t block_id(const LevelGeom& g, int bx, int by);        // §3.3
 int      tile_index(const LevelGeom& g, int bx, int by);
 Rect     block_pixel_rect(const LevelGeom& g, int cblk, int bx, int by);
-uint32_t crc32(const uint8_t* data, size_t n, uint32_t crc = 0);
 // Explicit little-endian (de)serialization. No packed-struct memcpy.
 std::vector<uint8_t> serialize(PrmdHeader& h, const std::vector<LevelEntry>&, const std::vector<uint32_t>& offsets);
 PrmdHeader parse_header(const uint8_t* buf, size_t n);   // magic, version, ids, dims, data_offset
 size_t     index_bytes(const PrmdHeader& h);             // level table + offsets size
 void parse_index(const PrmdHeader& h, const uint8_t* buf, size_t n, std::vector<LevelEntry>&,
-                 std::vector<uint32_t>& offsets);        // CRC, monotonic offsets, table == geometry
+                 std::vector<uint32_t>& offsets);        // monotonic offsets, table == geometry
 }
 ```
 
@@ -457,11 +456,13 @@ offset 0  ┌──────────────────────�
 | 20 | u16 | cblk | 128 |
 | 22 | u16 | quant | 0 = lossless; Q > 0 = quantizer step of the detail/residual bands (§5.2). Must be 0 for `independent` |
 | 24 | u32 | total_blocks | |
-| 28 | u32 | index_crc32 | CRC-32 of level table + offsets |
+| 28 | u8 | entropy | `Entropy` id: 0 = range, 1 = zstd, 2 = raw. An unknown id raises `FormatError` |
+| 29 | u8 | entropy_level | informational (as encoded; 0 = coder default) |
+| 30 | u8[2] | reserved | 0 |
 | 32 | u64 | data_offset | |
-| 40 | u8 | entropy | `Entropy` id: 0 = range, 1 = zstd, 2 = raw. An unknown id raises `FormatError` |
-| 41 | u8 | entropy_level | informational (as encoded) |
-| 42 | u8[22] | reserved | 0 |
+| 40 | u8[24] | reserved | 0 |
+
+There is no checksum. On open the decoder validates the header fields, the level table (must equal the geometry derived from the header), the offsets (start at 0, monotonic) and the file size (must equal `data_offset` + last offset). This stops a damaged file from crashing the decoder or reading outside the file. Detecting bit-level corruption is left to the storage layer: a checksum on the index alone would protect 5 KB of an 11 MB file, and a damaged payload can still decode to wrong pixels without an error.
 
 ### 3.2 Level entry (16 bytes)
 `u32 width, u32 height, u16 blocks_x, u16 blocks_y, u32 first_block` plus an implicit kind: `Base` for level N−1 (and for every level when `transform = independent`), otherwise `Detail`.
@@ -581,7 +582,7 @@ reconstruct(L, R):                         // R is in level-L coordinates, insid
 - **Block fetch.** The decoder collects the needed block ids for a level, sorts them, merges runs of consecutive ids into one `pread` (tile-major order makes a tile's blocks contiguous), then entropy-decodes each block.
 - **Cache (optional).** An LRU of decoded blocks (after MED/YCoCg-R inversion) keyed by block id, with a byte budget. Hits skip both I/O and decoding and are counted in `cache_hits`.
 - **Integers end to end.** All levels are reconstructed as int32 and clamped to [0, 255] only when the crop is returned. This matters for Cdf53, whose lowpass can overshoot 0–255 near edges (the 5/3 kernel has negative taps). The coarser level is rebuilt from the *unclamped* values, exactly as the encoder produced them.
-- **open()** reads 64 B of header and then the level table and index in one read, and checks the CRC. Nothing else is read until `decode`.
+- **open()** reads 64 B of header and then the level table and index in one read, and validates them (§3.1). Nothing else is read until `decode`.
 - **Naive** (`independent`): every level is Base, so the decoder never recurses.
 
 ---
@@ -682,7 +683,7 @@ The rest of this section describes the **`range`** coder.
 | `test_rangecoder.cpp` | round-trip of random, skewed and all-zero bit streams; `encode_direct` at every width; carry-propagation stress; skewed data compresses near entropy; truncated input sets `overrun()` without crashing |
 | `test_transform.cpp` | `build_pyramid` equals the independent `tests/reference.cpp` for every mode × gray/RGB × odd sizes (1×9, 2×3, 101×77, 257×130); forward/inverse identity for each transform incl. values outside 0–255; region inverse equals full inverse **and depends only on `*_needed` samples** (everything else overwritten with garbage) |
 | `test_blockcoder.cpp` | parameterised over every `Entropy`: round-trip of random, Laplacian-distributed and extreme values for every `Band` and 1/3 channels; truncated payload → `FormatError`; full int32 magnitudes for range; out-of-int16 → zstd/raw throw; YCoCg-R and MED round-trip |
-| `test_codec.cpp` | **crop matrix** for 7 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+zstd, cdf53+raw) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, index CRC, truncation) and option validation; haar and cdf53 smaller than naive |
+| `test_codec.cpp` | **crop matrix** for 7 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+zstd, cdf53+raw) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, level table, truncation) and option validation; haar and cdf53 smaller than naive |
 | `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+zstd × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
 | `test_j2k.cpp` | gray/RGB × 256/1024 tiles: L0 lossless vs source; 150 random crops + edges/corners at every level vs J2K's own full-level decode; TLM single-tile crop reads < ¼ of the file; bounds |
 

@@ -28,10 +28,9 @@ struct PrmdHeader {
   uint16_t cblk = 128;
   uint16_t quant = 0;
   uint32_t total_blocks = 0;
-  uint32_t index_crc32 = 0;
-  uint64_t data_offset = 0;
   Entropy entropy = Entropy::Range;
   uint8_t entropy_level = 0;
+  uint64_t data_offset = 0;
 };
 
 struct LevelEntry {
@@ -84,10 +83,7 @@ inline uint32_t block_id(const LevelGeom& g, int bx, int by) {
 // Pixel rect of block (bx, by) in its level, clipped to the level.
 Rect block_pixel_rect(const LevelGeom& g, int cblk, int bx, int by);
 
-uint32_t crc32(const uint8_t* data, size_t n, uint32_t crc = 0);
-
-// Serializes header + level table + offsets (header.index_crc32 / data_offset
-// are filled in).
+// Serializes header + level table + offsets (header.data_offset is filled in).
 std::vector<uint8_t> serialize(PrmdHeader& h,
                                const std::vector<LevelEntry>& levels,
                                const std::vector<uint32_t>& offsets);
@@ -97,8 +93,9 @@ std::vector<uint8_t> serialize(PrmdHeader& h,
 PrmdHeader parse_header(const uint8_t* buf, size_t n);
 // Size of level table + offsets that follow the header.
 size_t index_bytes(const PrmdHeader& h);
-// Parses level table + offsets; validates CRC, monotonic offsets and geometry
-// consistency.
+// Parses level table + offsets; validates monotonic offsets and geometry
+// consistency. There is no checksum: payload integrity is left to the storage
+// layer.
 void parse_index(const PrmdHeader& h,
                  const uint8_t* buf,
                  size_t n,

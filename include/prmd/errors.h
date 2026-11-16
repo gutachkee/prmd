@@ -11,7 +11,7 @@ struct IoError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
-// bad magic/version/CRC/payload
+// bad magic/version/field values/index/payload
 struct FormatError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };

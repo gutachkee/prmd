@@ -318,8 +318,14 @@ int cmd_info(int argc, char** argv) {
   if (is_prmd) {
     const internal::PrmdHeader& h = prmd.header;
     std::printf("tile / cblk     %d / %d\n", h.tile, h.cblk);
-    std::printf("entropy         %s (level %d)\n", to_string(h.entropy),
-                h.entropy_level);
+    // entropy_level is informational (decoders ignore it); 0 = coder default.
+    if (h.entropy != Entropy::Zstd) {
+      std::printf("entropy         %s\n", to_string(h.entropy));
+    } else if (h.entropy_level == 0) {
+      std::printf("entropy         zstd (default level)\n");
+    } else {
+      std::printf("entropy         zstd (level %d)\n", h.entropy_level);
+    }
     std::printf("quant           %d%s\n", h.quant,
                 h.quant ? " (lossy)" : " (lossless)");
   }

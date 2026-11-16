@@ -7,6 +7,7 @@ relative to the level above it** (integer Haar or 5/3 wavelet), so the whole pyr
 about as much as level 0 alone. A JPEG2000 (OpenJPEG) backend and a naive "every level tiled
 independently" layout are built in for comparison.
 
+- Modes and their options, with worked examples: [`docs/modes.md`](docs/modes.md)
 - Design and interfaces: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Results write-up: [`docs/WRITEUP.md`](docs/WRITEUP.md)
 - Benchmark: the key numbers are in the write-up; full tables are regenerated with `prmdbench` (below)

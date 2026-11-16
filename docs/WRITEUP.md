@@ -1,121 +1,161 @@
 # Prmd: random-access crops from a single-file image pyramid
 
-**Question:** can a 2× image pyramid be stored as one file that (a) decodes any `(level, x, y, w, h)` crop without decoding the whole level, and (b) is smaller than the naive "every level stored as independent 256² tiles" layout?
+`prmd` stores an image and its 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**. That's **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). A random 256² crop decodes in **0.3–0.6 ms** at any level.
 
-**Answer: yes, on both counts.**
-- **Size:** the lossless `.prmd` file holds all 5 levels of a 4096² image in **11.2–11.6 MiB**. The naive layout, using the same entropy coder, needs 15.0 MiB, so `.prmd` is **23–26% smaller**. The whole pyramid costs less than raw level 0 alone (16 MiB).
-- **Speed:** a random 256² crop decodes in **0.5–0.7 ms** at any level, reading about 150 KiB.
+Modes and their options are explained with worked examples in [modes.md](modes.md). Interfaces and full design details are in [DESIGN.md](DESIGN.md).
 
-All numbers come from `prmdbench` (commands in the README): the user's aerial JPEG, converted to gray and center-cropped to 4096², 5 levels, 300 random crops per row, on one Apple-class AArch64 core with the file in the page cache.
+## 1. The `prmd` tool
 
-## 1. Levels
+One C++17 library with three executables: `prmd` (encode, decode a crop, inspect a file), `prmdbench` (the benchmark) and `prmd_tests`. It depends on libjpeg, libpng, zstd and OpenJPEG; OpenJPEG is used only for the JPEG2000 comparison backend.
 
-Level 0 is the full image (4096²). Level L is the image shrunk by 2^L per side: 2048², 1024², 512², 256². One level-L pixel covers a 2^L × 2^L patch of the original. Crop coordinates are in that level's own pixels. For example, `decode(2, 100, 50, 256, 256)` covers the area x = 400…1424 of the original. Odd sizes round up (`ceil(W/2^L)`).
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+ctest --test-dir build                                    # 198 tests
 
-What a level pixel *is* depends on the mode, and the mode is chosen at encode time:
-
-| mode | level L+1 = | stored per level | notes |
-|---|---|---|---|
-| `haar` (default) | exact 2×2 mean of level L | 3 integer Haar detail bands | non-redundant, no context needed across blocks |
-| `cdf53` | 5/3 wavelet lowpass (same as JPEG2000) | 3 detail bands | smoothest levels, best ratio; 1-coefficient margin per level |
-| `laplacian` | any downsampler (`box`, `gauss`) | residual vs. upsampled coarse level | 1.33× samples; only mode with a hard per-pixel error bound when lossy |
-| `naive` | 2×2 mean, stored independently | full pixels at every level | the baseline from the task |
-
-## 2. Design and format
-
-**Key idea.** Only the coarsest level is stored as pixels. Every finer level is stored as the *detail* that turns level L+1 into level L, so the full pyramid has the same number of samples as level 0, not 1.33×. The decoder reaches a level-L crop like this:
-1. It takes the matching patch of the coarsest level.
-2. It walks down, adding detail only for the region it needs. Each step halves the region, so ancestor work shrinks geometrically.
-3. It stops at level L, so finer levels are never touched.
-
-```
-.prmd  ┌ header 64 B: magic, version, mode, W, H, N, color, tile, cblk, quant, entropy id, index CRC
-       ├ level table: N × 16 B (size, block grid, first block id)
-       ├ block index: u32 offset per block (+1)   ← read once at open, ~6 KB for 4096²
-       ├ level N−1 blocks (base pixels, MED-predicted)
-       ├ level N−2 … 0 blocks (detail bands / residuals)
-       └ blocks are 128² code-blocks of their own level, stored tile-major (a 256² tile = 2×2 contiguous blocks)
+build/prmd encode photo.jpg img.prmd --levels 5           # JPEG/PNG in; gray by default
+build/prmd decode img.prmd --level 2 --x 100 --y 50 --w 256 --h 256 -o crop.png --stats
+build/prmd info img.prmd                                  # levels, blocks, bytes per level
 ```
 
-**Random access.**
-- `open()` reads the header and index in one read and checks the CRC.
-- A crop maps to a block set with O(1) arithmetic. `block_id` is a closed-form function of (level, tile, block), and missing edge blocks are zero-length index entries. Nothing scans the file.
-- Contiguous blocks are fetched with one `pread`.
-- Each block is entropy-coded independently, so a crop is seamless by construction: the decoder rebuilds exactly the pixels a full decode would produce.
-- Out-of-bounds requests throw `std::out_of_range`. `decode_clamped` / `--clamp` decodes the intersection and returns the actual rect.
+- **Encode options:** `--mode haar|cdf53|laplacian|naive` (what levels are and what's stored; see §2), `--color gray|rgb`, `--quant Q` (lossy), `--entropy zstd|range|raw`, `--tile`, `--cblk`, `--down box|gauss`. `--codec j2k` writes a JPEG2000 file instead, for comparison.
+- **Decode:** coordinates are in the chosen level's own pixels. A request that goes outside the level is rejected with exit code 4; `--clamp` decodes the part that's inside instead. `--stats` prints tiles touched, blocks decoded, bytes read and read calls.
+- **Library:** `open_decoder(path)` returns a decoder for `.prmd` or `.j2k` files (picked by the file's magic bytes), and `decode(level, rect)` returns the pixels plus the same stats. An optional LRU cache of decoded blocks speeds up repeated, overlapping crops.
 
-**Entropy coding.**
-- Coefficients are integers, coded per block with **zstd** (the default) or with a custom context-adaptive binary **range coder**.
-- zstd files are 4–5% larger than range-coder files (gray) but decode **~12× faster**: 0.56 ms vs 7.04 ms per 256² L0 crop.
-- The crop latency budget matters more than 4% of storage, so zstd is the default. The full decision record is in DESIGN.md §7.1.
-- RGB uses the reversible YCoCg-R transform on the coefficients and stays bit-exact.
+## 2. Design
 
-**Why not just JPEG2000?** It was implemented as a backend (OpenJPEG 2.5.4) and benchmarked rather than assumed. It compresses 3–6% better than `.prmd`+zstd, but it falls short on the two properties the task cares about most:
-- **Speed:** crops are 15–25× slower.
-- **Access granularity at coarse levels:** J2K tiles are defined at full resolution, so a tile's codestream holds all its resolutions. A 256² crop at L4 reads the **entire file** (10.8 MiB, 513 reads), against 44 KiB for `.prmd`. Larger J2K tiles cut the tile count but read even more per crop.
+**Key idea.** Only the coarsest level is stored as pixels. Each finer level L is stored as the *detail* that turns level L+1 back into level L. With a wavelet, each 2×2 block of pixels becomes 1 coarse pixel plus 3 detail numbers, so the whole pyramid costs as many samples as level 0 alone, not 1.33×. To decode a level-L crop, the decoder takes the matching patch of the coarsest level and walks down, adding detail only for the region it needs. The region halves at each step up, so the work on coarser levels shrinks geometrically, and levels finer than L are never read.
 
-On an embedded ARM target, `.prmd` needs about 2 kLOC of plain C++17 plus zstd. It uses no FPU or SIMD, the decode memory is bounded by the crop plus about one block per level, and an optional LRU cache of decoded blocks is available.
+**Modes.** The mode is chosen at encode time and sets what a level is:
 
-## 3. Results (gray 4096², 5 levels, lossless)
+| mode | level L+1 is | stored for each finer level |
+|---|---|---|
+| `haar` (default) | exact integer 2×2 mean | 3 integer Haar detail bands (1.0× samples) |
+| `cdf53` | 5/3 wavelet lowpass, as in JPEG2000; sharper | 3 detail bands (1.0×) |
+| `laplacian` | `box` (2×2 mean) or `gauss` downsample | residual vs. the upsampled coarser level (~1.33×) |
+| `naive` | `box` or `gauss` downsample | every level as plain pixels (~1.33×), the task's baseline |
 
-| codec | file size | vs naive | 256² crop at L0: mean / p95 | 256² at L2 | 256² at L4 | 512² at L0: mean / p95 | bytes read, 256² L0 |
+**Random access.** Opening a file reads the header and the block index in one read. A crop maps to its blocks by closed-form arithmetic on (level, tile, block), so nothing scans the file, and runs of blocks that sit next to each other on disk are fetched with one `pread`. Each block is entropy-coded on its own, so a crop reproduces exactly what a full decode would, and crops are seamless by construction.
+
+The tests prove this. Every crop (inside a tile, across 2 and 4 tiles, edges, corners, the full level) is compared bit for bit with a reference pyramid built by separate code. Every block a crop shouldn't need is overwritten with random bytes, and the crop still decodes exactly.
+
+**Entropy coding.** Each block's numbers are coded with zstd by default. A custom context-adaptive range coder makes files 4–5% smaller but decodes about 12× slower, and crop latency matters more than 4% of storage here.
+
+**Color and lossy.** RGB uses the reversible YCoCg-R transform and stays bit-exact. `--quant Q` quantizes the detail or residual numbers. The decode path, and so random access, stays the same, and the coarsest level stays exact.
+
+**Why not JPEG2000?** It's built in as a backend (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better, but crops decode **15–25× slower**. Its access granularity is also poor at coarse levels: JPEG2000 tiles are defined at full resolution and each holds all its resolutions, so a 256² crop at L4 reads the **whole file** (10.8 MiB, against 44 KiB for `.prmd`).
+
+**Embedded ARM.** About 2 kLOC of plain C++17 plus zstd, integer arithmetic only, no SIMD required. Decode memory is bounded by the crop plus about one block per level.
+
+## 3. Format layout
+
+All integers are little-endian.
+
+```
+offset 0   ┌───────────────────────────────────────────────┐
+           │ header, 64 B                                  │
+           ├───────────────────────────────────────────────┤
+           │ level table: N × 16 B                         │  level 0 … N−1
+           ├───────────────────────────────────────────────┤
+           │ block index: u32 offset × (blocks + 1)        │  ~5.5 KB for 4096², 5 levels
+           ├───────────────────────────────────────────────┤ ← data_offset
+           │ level N−1 blocks: pixels, MED-predicted       │  coarsest level first
+           │ level N−2 blocks: detail bands or residuals   │
+           │ …                                             │
+           │ level 0 blocks                                │
+           └───────────────────────────────────────────────┘
+```
+
+| bytes | header field |
+|---|---|
+| 0–3 | magic `PRMD` |
+| 4–5 | version (1) |
+| 6–7 | mode, downsampler |
+| 8–15 | width, height of level 0 |
+| 16–17 | number of levels N, color format |
+| 18–23 | tile size, code-block size, quantizer step Q |
+| 24–27 | total number of blocks |
+| 28–29 | entropy coder, its level (informational) |
+| 32–39 | `data_offset`, where block data starts |
+| 30–31, 40–63 | reserved, zero |
+
+- **Level entry:** width, height, block grid (columns × rows) and the id of the level's first block.
+- **Blocks:** each level is cut into 128² code-blocks of its own pixels, the unit that's decoded, read and cached. Blocks are stored tile by tile, so a 256² tile's 2×2 blocks are next to each other on disk. A block's id is a formula of (level, tile, position in tile), and block *b* is the bytes from `offset[b]` to `offset[b+1]`. Edge tiles keep ids for their missing blocks, with zero length, so the formula stays simple.
+- **Block payload:** the coder's output, with no per-block header. A block's size and contents follow from the level table and the header. All channels of an area are in the same block, so RGB needs no extra reads.
+- **Validation on open:** header fields in range, level table equal to the geometry derived from the header, offsets starting at 0 and increasing, and file size equal to `data_offset` plus the last offset. There's no checksum (see §5).
+
+## 4. Trade-offs
+
+All numbers come from `prmdbench` (commands in the README): the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd, 300 random crops per row, one Apple AArch64 core, file in the page cache, run on 2026-11-16. Sizes are deterministic. Latencies vary by up to about 10% between runs, so compare them within one table rather than across runs.
+
+**Fewer bytes stored, more blocks per crop.** A crop also decodes the blocks of the coarser levels it's built from.
+
+| codec | file size | vs raw L0 (16.00 MiB) | vs raw pyramid (21.31 MiB) | vs naive |
+|---|---:|---:|---:|---:|
+| **haar** | 11.59 MiB | 1.38× smaller | 1.84× smaller | **−22.9%** |
+| **cdf53** | 11.19 MiB | 1.43× smaller | 1.91× smaller | **−25.6%** |
+| laplacian-gauss | 14.29 MiB | 1.12× smaller | 1.49× smaller | −5.0% |
+| naive (same coder) | 15.04 MiB | 1.06× smaller | 1.42× smaller | 0 |
+| JPEG2000, 256² tiles | 10.84 MiB | 1.48× smaller | 1.97× smaller | −27.9% |
+
+Per-crop latency and I/O. *Tiles* counts the distinct 256² tiles touched on every level a crop depends on, so for `.prmd` a 256² crop at L0 touches 4 tiles of its own level and 9.5 in total. *Bytes* is the block data read, not counting the index.
+
+| crop | level | haar mean / p95 | tiles · bytes | naive mean / p95 | tiles · bytes | J2K mean / p95 | tiles · bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **haar** | 11.59 MiB | **−22.9%** | **0.54 / 0.64 ms** | 0.51 ms | 0.28 ms | 1.52 / 1.65 ms | 154 KiB |
-| **cdf53** | 11.19 MiB | **−25.6%** | 0.72 / 0.84 ms | 0.64 ms | 0.27 ms | 2.23 / 2.40 ms | 162 KiB |
-| laplacian-gauss | 14.29 MiB | −5.0% | 0.72 / 0.86 ms | 0.60 ms | 0.24 ms | 2.00 / 2.14 ms | 181 KiB |
-| naive (same coder) | 15.04 MiB | 0 | 0.87 / 0.94 ms | 0.78 ms | 0.34 ms | 2.42 / 2.51 ms | 101 KiB |
-| JPEG2000, 256 tiles | 10.84 MiB | −27.9% | 12.65 / 14.31 ms | 8.29 ms | 6.01 ms (reads all 10.8 MiB) | 32.0 / 35.0 ms | 191 KiB |
-| raw level 0 / raw pyramid | 16.00 / 21.31 MiB | | | | | | |
+| 256² | L0 | 0.58 / 0.70 ms | 9.5 · 154 KiB | 0.57 / 0.59 ms | 4 · 101 KiB | 13.5 / 15.3 ms | 4 · 191 KiB |
+| 256² | L1 | 0.52 / 0.59 ms | 8.2 · 143 KiB | 0.55 / 0.58 ms | 4 · 103 KiB | 12.3 / 13.1 ms | 9 · 433 KiB |
+| 256² | L2 | 0.49 / 0.61 ms | 6.8 · 129 KiB | 0.55 / 0.56 ms | 4 · 99 KiB | 8.7 / 9.2 ms | 25 · 1.2 MiB |
+| 256² | L3 | 0.51 / 0.53 ms | 5.0 · 119 KiB | 0.53 / 0.57 ms | 4 · 99 KiB | 7.6 / 8.3 ms | 81 · 3.8 MiB |
+| 256² | L4 (whole level) | 0.26 / 0.26 ms | 1.0 · 44 KiB | 0.25 / 0.27 ms | 1 · 44 KiB | 6.3 / 6.9 ms | 256 · 10.8 MiB |
+| 512² | L0 | 1.64 / 1.82 ms | 17.4 · 362 KiB | 1.67 / 1.97 ms | 9 · 282 KiB | 35.4 / 39.3 ms | 9 · 429 KiB |
+| 512² | L1 | 1.55 / 1.71 ms | 15.7 · 346 KiB | 1.59 / 1.81 ms | 9 · 286 KiB | 35.1 / 38.0 ms | 25 · 1.2 MiB |
+| 512² | L2 | 1.53 / 1.64 ms | 14.0 · 331 KiB | 1.59 / 1.95 ms | 9 · 276 KiB | 29.9 / 33.3 ms | 81 · 3.8 MiB |
+| 512² | L3 (whole level) | 1.10 / 1.18 ms | 5.0 · 179 KiB | 1.03 / 1.12 ms | 4 · 176 KiB | 24.4 / 26.7 ms | 256 · 10.8 MiB |
 
-- **Per crop:** a 256² crop at L0 touches 4 tiles of its own level. Counting the ancestor work, a haar crop decodes 17.5 code-blocks in 10 coalesced reads, against 8.9 blocks in 4 reads for naive.
-- **Haar is still faster than naive.** Its detail blocks skip the serial MED predictor that every naive pixel block runs. The `raw` coder isolates this: 0.37 vs 0.65 ms.
-- **Random access pays off.** Decoding the full L0 and then cropping costs 77 ms (haar), which is **140×** more than the crop.
-- **Repeated crops:** along a 1000-step navigation-like random walk with a 64 MiB block cache, a haar crop drops from 0.51 ms to 0.17 ms.
-- **RGB** (same image, 100 crops per row): haar is 22.9 MiB (−22.8% vs naive) and a 256² L0 crop takes 2.0 ms; J2K is 21.0 MiB at 25 ms.
+A `haar` crop decodes about 2× `naive`'s blocks and reads 1.5× its bytes, in exchange for a 23% smaller file, and is about as fast. `haar`'s detail blocks need only a few adds and shifts per pixel. `naive`'s pixel blocks run the MED predictor, which goes pixel by pixel but was made branch-free (2.4× faster), so the two cost about the same overall. Decoding the whole of L0 and then cropping would cost 84 ms, about **145×** a crop. On a 1000-step random walk, a 64 MiB block cache brings a `haar` crop down to 0.19 ms.
 
-**Lossy mode** (`--quant Q`):
-- The decode path and random access are unchanged.
-- The coarsest level stays exact.
-- `laplacian` is closed-loop, so every level is within ±Q/2 of the exact pyramid.
+**Encode and decode time per mode.** Encode covers building and writing the whole 5-level pyramid of the 4096² image. Decode is a random crop at L0, or the whole of L0 or L1 at once.
 
-| codec | setting | bits/px | PSNR L0 | max err | 256² L0 |
+| mode | encode | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
+|---|---:|---:|---:|---:|---:|
+| `haar` | 1.18 s | 0.58 / 0.70 ms | 1.64 / 1.82 ms | 84 ms | 19.5 ms |
+| `cdf53` | 1.42 s | 0.75 / 0.86 ms | 2.42 / 2.60 ms | 267 ms | 45.9 ms |
+| `laplacian-box` | 1.61 s | 0.77 / 0.87 ms | 2.27 / 2.45 ms | 119 ms | 27.1 ms |
+| `laplacian-gauss` | 1.66 s | 0.75 / 0.85 ms | 2.18 / 2.44 ms | 110 ms | 24.8 ms |
+| `naive` | 1.58 s | 0.57 / 0.59 ms | 1.67 / 1.97 ms | 78 ms | 18.5 ms |
+| JPEG2000, 256² tiles | 1.38 s | 13.5 / 15.3 ms | 35.4 / 39.3 ms | 1294 ms | 348 ms |
+
+Encode times are close across modes, and zstd at its default level 19 is most of the cost: on RGB, `haar` takes 9.5 s to encode with zstd but 1.2 s with the range coder. With `--entropy-level 3`, gray `haar` encodes in 95 ms instead of 1.23 s, and the file is only 0.1% larger. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3× slower.
+
+**Speed vs. size of the entropy coder.** zstd: 11.59 MiB at 0.61 ms per 256² crop. Range coder: 11.13 MiB at 7.2 ms. zstd is the default.
+
+**Level definition.** `haar` levels are the exact 2×2 mean, but they alias. `cdf53` and `laplacian-gauss` levels are sharper or smoother and differ from the 2×2 mean by 24–30 dB PSNR, mostly a half-pixel shift. The image matcher's needs should decide the mode, not the codec. [modes.md](modes.md) has side-by-side samples.
+
+**Lossy** (`--quant Q`): max error is in 8-bit pixel values (0–255).
+
+| codec | setting | bits/px | PSNR L0 | max err | 256² at L0 |
 |---|---|---:|---:|---:|---:|
-| cdf53 | Q = 4 | 3.41 | 41.9 dB | 11 | 0.74 ms |
-| laplacian-gauss | Q = 4 | 4.60 | 46.4 dB | **2** (guaranteed) | 0.79 ms |
-| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 8.0 ms |
+| haar | Q = 4 | 3.56 | 38.6 dB | 12 | 0.62 ms |
+| cdf53 | Q = 4 | 3.41 | 41.9 dB | 11 | 0.81 ms |
+| laplacian-gauss | Q = 4 | 4.60 | 46.4 dB | **2** (±Q/2, guaranteed) | 0.83 ms |
+| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 8.9 ms |
 
-J2K wins rate–distortion by about 3 dB, thanks to rate-distortion-optimised truncation and the smoother 9/7 filter. `.prmd` decodes about 10× faster.
+`haar` and `cdf53` quantize open loop, so errors pile up toward level 0. `laplacian` is closed loop and keeps every level within ±Q/2, at the cost of a larger file. JPEG2000 gets about 3 dB more for the same size, thanks to rate-distortion-optimised truncation and the smoother 9/7 filter, but `.prmd` decodes 10–14× faster.
 
-## 4. Correctness and proof of random access
+**RGB.** `haar` is 22.9 MiB (−22.8% vs `naive`) at 2.1 ms per 256² crop. JPEG2000 is 21.0 MiB at 30 ms.
 
-There are 198 gtest cases (`ctest`).
-- **Exactness:** every crop is compared exactly against a reference pyramid built by independent code in the test, not by the codec's transforms. The crop matrix covers every level, mode and color format, and these shapes:
-  - inside a block, inside a tile, across 2 tiles (horizontal and vertical), across 4 tiles
-  - every edge and corner, the full level, 1×1
-  - odd sizes and tiny images
-- **Fuzzing:** seeded random crops.
-- **Random access is proven three ways:**
-  - The decoded block set equals an independently derived expected set, and `bytes_read` equals the exact sum of those payloads.
-  - Every payload *outside* that set is overwritten with random bytes, and the crop stays exact.
-  - Negative control: corrupting one block *inside* the set breaks the crop, so the previous check cannot pass vacuously.
-- **Also tested:** corrupted headers and indexes, option validation, lossy mode against an independent whole-plane simulation, and J2K crops against J2K's own full decode.
+## 5. Limitations
 
-## 5. Trade-offs, limitations, next steps
-
-**Trade-offs.**
-- **Fewer bytes stored, more blocks per crop.** A crop decodes its ancestors' blocks too: about 2× naive's block count and 1.5× its bytes read. In return the file is 23–26% smaller and decoding is still faster. The block cache removes the ancestor cost on trajectories.
-- **Level definition.** `haar` levels are the exact 2×2 mean but alias. `cdf53` and `laplacian-gauss` levels are smoother, at about 24–30 dB PSNR vs the 2×2 mean (mostly a half-pixel phase offset). The matcher's feature extractor should pick the mode, not the codec.
-
-**Limitations.**
-- Only 8-bit Gray and RGB.
+- Only 8-bit gray and RGB.
 - The decoder is single-threaded.
-- Lossy haar/cdf53 errors accumulate toward level 0, so there is no per-pixel bound.
-- On RGB, zstd costs 12% vs the range coder, which makes J2K the smallest RGB file.
+- 32-bit block offsets cap a file at 4 GiB.
+- No checksums: a damaged block can decode to wrong pixels without an error, so integrity is left to the storage layer.
+- Lossy `haar` and `cdf53` have no per-pixel error bound.
+- On RGB, zstd costs 12% vs. the range coder, which makes JPEG2000 the smallest RGB file.
 
-**Next steps.**
-- A context-adaptive **rANS** coder or a per-file zstd dictionary, to recover the 4–12% while keeping zstd-class speed.
-- Decoding the blocks of one level in parallel.
-- NEON inverse transforms.
+## 6. Next steps
+
+- An adaptive rANS coder or a per-file zstd dictionary, to recover the 4–12% at zstd speed.
+- Decode the blocks of one level in parallel.
+- NEON versions of the inverse transforms.
 - `mmap` I/O.
-- A dead-zone quantizer with rate-distortion-weighted steps per level, to close the lossy gap to J2K.
-- Optional storage of an extra "decimated" phase, so `cdf53` levels align to the pixel grid.
+- Rate-distortion-weighted quantizer steps per level, to close the lossy gap to JPEG2000.

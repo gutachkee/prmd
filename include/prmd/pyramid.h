@@ -19,7 +19,7 @@ namespace prmd {
 //   Laplacian/Independent:
 //              Box (a+b+c+d+2)>>2, or
 //              Gauss [1 4 6 4 1]/16 reflect-101 (s+128)>>8
-// Throws std::invalid_argument if levels is outside 1..kMaxLevels.
+// Throws std::invalid_argument if levels is outside 1..kMaxLevels, see encoder.h
 std::vector<Image> build_pyramid(const Image& src,
                                  int levels,
                                  Transform t,
