@@ -13,8 +13,19 @@ endif()
 option(PRMD_NATIVE "Tune for the build host CPU (-mcpu=native)" ON)
 option(PRMD_BUILD_TESTS "Build unit tests" ON)
 option(PRMD_PROFILE "Compile the PRMD_TIMED pipeline timers in (include/prmd/profile.h)" OFF)
+# Sanitizer builds (use a separate build directory):
+#   -DPRMD_SANITIZE=address,undefined   ASan + UBSan
+#   -DPRMD_SANITIZE=thread              TSan (the multithreaded encoder)
+set(PRMD_SANITIZE "" CACHE STRING
+    "Sanitizers for every target, e.g. address,undefined or thread (empty: none)")
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+if(PRMD_SANITIZE)
+  # Every finding is fatal, so ctest fails on it.
+  add_compile_options(-fsanitize=${PRMD_SANITIZE} -fno-sanitize-recover=all
+                      -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=${PRMD_SANITIZE})
+endif()
 # 64-bit off_t on 32-bit targets (armv7): files may approach 4 GiB.
 add_compile_definitions(_FILE_OFFSET_BITS=64)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -36,6 +47,7 @@ find_package(PNG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 pkg_check_modules(OPENJP2 REQUIRED IMPORTED_TARGET libopenjp2)
+find_package(Threads REQUIRED)
 
 set(PRMD_CORE_SOURCES
   src/image.cpp
@@ -52,11 +64,13 @@ set(PRMD_CORE_SOURCES
   src/encoder.cpp
   src/j2k_codec.cpp
   src/profile.cpp
+  src/parallel.cpp
 )
 
 add_library(prmd_core STATIC ${PRMD_CORE_SOURCES})
 target_include_directories(prmd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(prmd_core PUBLIC JPEG::JPEG PNG::PNG PkgConfig::ZSTD PkgConfig::OPENJP2)
+target_link_libraries(prmd_core PUBLIC JPEG::JPEG PNG::PNG PkgConfig::ZSTD PkgConfig::OPENJP2
+                      Threads::Threads)
 if(PRMD_PROFILE)
   # PUBLIC, so tools linking prmd_core see the same PRMD_TIMED and kEnabled.
   target_compile_definitions(prmd_core PUBLIC PRMD_PROFILE)
@@ -90,6 +104,7 @@ if(PRMD_BUILD_TESTS)
     tests/test_j2k.cpp
     tests/test_lossy.cpp
     tests/test_cli.cpp
+    tests/test_parallel.cpp
     tests/reference.cpp
   )
   add_executable(prmd_tests ${PRMD_TEST_SOURCES})

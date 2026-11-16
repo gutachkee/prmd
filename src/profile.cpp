@@ -4,6 +4,8 @@
 
 #ifdef PRMD_PROFILE
 
+#include "prmd/internal/profile_threads.h"
+
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -17,6 +19,9 @@ struct Node {
   std::vector<std::unique_ptr<Node>> children;  // first-seen order
   uint64_t calls = 0;
   int64_t ns = 0;
+  // Part of calls / ns merged in from pool worker threads.
+  uint64_t worker_calls = 0;
+  int64_t worker_ns = 0;
 
   Node* child(const char* n) {
     for (auto& c : children) {
@@ -61,12 +66,62 @@ void walk(const Node& n,
     e.depth = depth;
     e.calls = c->calls;
     e.ms = double(c->ns) / 1e6;
+    e.worker_calls = c->worker_calls;
+    e.worker_ms = double(c->worker_ns) / 1e6;
     out.push_back(e);
     walk(*c, e.path, depth + 1, out);
   }
 }
 
+// Adds every node below `src` to the matching (by name) node below `dst`,
+// counting it as worker time.
+void merge(Node& dst, const Node& src) {
+  for (const auto& c : src.children) {
+    Node* d = dst.child(c->name);
+    d->calls += c->calls;
+    d->ns += c->ns;
+    d->worker_calls += c->calls;
+    d->worker_ns += c->ns;
+    merge(*d, *c);
+  }
+}
+
 }  // namespace
+
+namespace detail {
+
+struct Subtree {
+  Node root;
+};
+
+void SubtreeDeleter::operator()(Subtree* t) const {
+  delete t;
+}
+
+void* current_scope() {
+  return tree().current;
+}
+
+void begin_worker() {
+  reset();
+}
+
+SubtreePtr end_worker() {
+  Tree& t = tree();
+  if (t.root.children.empty()) {
+    return nullptr;
+  }
+  SubtreePtr out(new Subtree);
+  out->root.children = std::move(t.root.children);
+  reset();
+  return out;
+}
+
+void merge_worker(void* scope, Subtree& t) {
+  merge(*static_cast<Node*>(scope), t.root);
+}
+
+}  // namespace detail
 
 Scope::Scope(const char* name) {
   Tree& t = tree();

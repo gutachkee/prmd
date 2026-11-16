@@ -10,8 +10,28 @@
 // entry and exit and adds the difference to a node of a call tree. A scope
 // opened while another is open becomes its child, so a parent's time includes
 // its children. Nodes are merged by (parent, name): a step that runs once per
-// block accumulates all its calls into one node with a call count. The tree
-// is per thread (thread_local); prmd decodes and encodes on one thread.
+// block accumulates all its calls into one node with a call count.
+//
+// Threads. The tree is per thread (thread_local): reset() and snapshot() see
+// the calling thread's tree. A multithreaded encode (EncodeOptions::threads
+// != 1) runs parts of a step on pool worker threads; the pool merges what
+// the workers recorded into the calling thread's tree, under the scope that
+// was open on the calling thread when the work was handed out, at the end of
+// every parallel section. What the numbers then mean:
+//   * A scope opened on the calling thread around parallel work (e.g.
+//     "encode_blocks", "forward", "quantize") is WALL time: its ms is the
+//     elapsed time of the step, and worker_ms is 0.
+//   * A scope opened inside the parallel work (e.g. "make_block",
+//     "entropy_encode", "zstd_compress", once per block on whichever thread
+//     ran the block) is SUMMED THREAD time: its ms adds up the time of every
+//     thread that ran it, roughly CPU time, so it can exceed its parent's
+//     wall time (by up to the thread count). worker_ms / worker_calls are the
+//     part contributed by worker threads; ms - worker_ms is the calling
+//     thread's own share.
+// With threads = 1 nothing runs on another thread, every number is wall time
+// on the calling thread and worker_ms is 0, as before threading existed.
+// Comparing a child's ms with its parent's at N threads gives the parallel
+// efficiency of that step: ms(child) / (N * ms(parent)).
 //
 // Usage (see tools/prmd_pipeline.cpp):
 //   prmd::profile::reset();
@@ -34,8 +54,13 @@ struct Entry {
   std::string path;  // names from the root, joined by '/': "encode/blocks/zstd"
   std::string name;  // last component of path
   int depth = 0;     // 0 for top-level scopes
-  uint64_t calls = 0;
-  double ms = 0;     // total wall time over all calls, children included
+  uint64_t calls = 0;  // all threads
+  // Total time over all calls, children included: wall time for scopes on
+  // the calling thread, summed over threads for scopes that also ran on pool
+  // workers (see "Threads" above).
+  double ms = 0;
+  uint64_t worker_calls = 0;  // part of calls made on pool worker threads
+  double worker_ms = 0;       // part of ms measured on pool worker threads
 };
 
 // Clears this thread's tree. Must not be called while a scope is open.
