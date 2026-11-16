@@ -43,6 +43,12 @@ class BlockCoder {
 // std::invalid_argument for an unknown id or invalid level.
 std::unique_ptr<BlockCoder> make_block_coder(Entropy e, int level = 0);
 
+// Frees the calling thread's encode scratch of the built-in coders (the
+// packed-stream buffer the raw and zstd coders reuse across blocks). The
+// encoder calls it when an encode ends, so the calling thread keeps no
+// scratch afterwards.
+void release_coder_scratch();
+
 // Reversible color decorrelation (YCoCg-R), in place, on any signed ints.
 void ycocg_r_forward(int32_t* c0, int32_t* c1, int32_t* c2, size_t n);
 void ycocg_r_inverse(int32_t* c0, int32_t* c1, int32_t* c2, size_t n);

@@ -12,12 +12,18 @@ namespace prmd::internal {
 
 class BlockCoder;
 
+// The format's limit on the data section (32-bit block offsets).
+constexpr uint64_t kMaxDataBytes = 0xFFFFFFFFull;
+
 // `coder` replaces the entropy coder chosen by opts.entropy (tests: fault
 // injection); null = make_block_coder(opts.entropy, opts.entropy_level).
+// `max_data_bytes` lowers the data-section limit (tests: the "exceeds 4 GiB"
+// error without 4 GiB of data); the error message is the same.
 EncodeReport encode_prmd(const Image& src,
                          const std::string& path,
                          const EncodeOptions& opts,
-                         const BlockCoder* coder = nullptr);
+                         const BlockCoder* coder = nullptr,
+                         uint64_t max_data_bytes = kMaxDataBytes);
 std::unique_ptr<CropDecoder> open_prmd(const std::string& path,
                                        const DecoderOptions& opts);
 

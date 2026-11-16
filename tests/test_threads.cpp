@@ -896,25 +896,30 @@ class FailingCoder final : public internal::BlockCoder {
   mutable std::atomic<int> calls_{0};
 };
 
-// Encodes `c` with `coder` at `threads`; returns the exception message (empty
-// if none) and checks that no file was left behind.
+// Encodes `c` with `coder` at `threads` (data section limited to
+// `max_data`); returns the exception message (empty if none) and checks
+// that no file was left behind.
 std::string failing_encode(const Case& c,
                            const internal::BlockCoder& coder,
-                           int threads) {
+                           int threads,
+                           uint64_t max_data = internal::kMaxDataBytes) {
   EncodeOptions o = c.opts;
   o.threads = threads;
   const std::string path = testutil::temp_path("fail.prmd").string();
   std::filesystem::remove(path);
   std::string msg;
   try {
-    internal::encode_prmd(source_of(c), path, o, &coder);
+    internal::encode_prmd(source_of(c), path, o, &coder, max_data);
   } catch (const std::runtime_error& e) {
     msg = std::string("runtime_error: ") + e.what();
   } catch (const std::invalid_argument& e) {
     msg = std::string("invalid_argument: ") + e.what();
   }
-  EXPECT_FALSE(std::filesystem::exists(path))
-      << "partial output left behind at threads " << threads;
+  if (!msg.empty()) {
+    EXPECT_FALSE(std::filesystem::exists(path))
+        << "partial output left behind at threads " << threads;
+  }
+  std::filesystem::remove(path);
   return msg;
 }
 
@@ -924,6 +929,9 @@ bool fails_some(const internal::BlockPlanes& in) {
 }
 bool fails_all(const internal::BlockPlanes&) {
   return true;
+}
+bool fails_none(const internal::BlockPlanes&) {
+  return false;
 }
 bool fails_full_size_detail(const internal::BlockPlanes& in) {
   // Only full-size level-0 detail blocks: the last level in file order.
@@ -981,6 +989,64 @@ TEST(ThreadsErrors, ExistingFileIsLeftUntouched) {
                  std::runtime_error);
     EXPECT_EQ(testutil::read_file(path), old) << n;
   }
+}
+
+TEST(ThreadsErrors, DataSizeLimitFailsEarlyWithTheSameError) {
+  // The "exceeds 4 GiB" check, with a lowered limit: coding stops soon after
+  // the payloads pass it (instead of coding every block first), with the
+  // serial encoder's error at every thread count.
+  Case c = case_named("haar_1000x777_gray");
+  c.opts.cblk = 16;
+  c.opts.tile = 16;
+  const int blocks = present_blocks(c);
+  for (const uint64_t limit : {uint64_t(0), uint64_t(1000), uint64_t(20000)}) {
+    const FailingCoder serial_coder(fails_none, false);
+    const std::string serial = failing_encode(c, serial_coder, 1, limit);
+    EXPECT_EQ(serial, "runtime_error: encoded data exceeds 4 GiB") << limit;
+    EXPECT_LT(serial_coder.calls(), blocks / 2) << limit;
+    for (const int n : {2, 4, 7, 0}) {
+      const FailingCoder coder(fails_none, false);
+      EXPECT_EQ(failing_encode(c, coder, n, limit), serial)
+          << "threads " << n << " limit " << limit;
+      EXPECT_LT(coder.calls(), blocks / 2) << "threads " << n;
+    }
+  }
+}
+
+TEST(ThreadsErrors, CoderFailureAndDataSizeLimitInSerialOrder) {
+  // Whichever comes first in block order wins, as in the serial encoder:
+  // a coder failure in an early block, or the size limit passed before a
+  // failing block is reached.
+  Case c = case_named("haar_1000x777_gray");
+  c.opts.cblk = 32;
+  c.opts.tile = 64;
+  struct Scenario {
+    FailingCoder::Pred pred;
+    uint64_t limit;
+  };
+  const Scenario scenarios[] = {
+      {fails_some, 1000},  // the coder fails before the limit is passed
+      {fails_full_size_detail, 1000},  // the limit is passed first
+      {fails_full_size_detail, 30000},
+      {fails_full_size_detail, internal::kMaxDataBytes},  // only the coder
+      {fails_some, internal::kMaxDataBytes},
+  };
+  std::set<std::string> outcomes;
+  for (const Scenario& sc : scenarios) {
+    const FailingCoder serial_coder(sc.pred, false);
+    const std::string serial = failing_encode(c, serial_coder, 1, sc.limit);
+    ASSERT_FALSE(serial.empty());
+    outcomes.insert(serial.find("4 GiB") != std::string::npos ? "size"
+                                                               : "coder");
+    for (const int n : {2, 3, 8, 0}) {
+      for (int rep = 0; rep < 3; ++rep) {
+        const FailingCoder coder(sc.pred, false);
+        EXPECT_EQ(failing_encode(c, coder, n, sc.limit), serial)
+            << "threads " << n << " limit " << sc.limit;
+      }
+    }
+  }
+  EXPECT_EQ(outcomes.size(), 2u);  // both kinds of failure were exercised
 }
 
 TEST(ThreadsErrors, ParallelCodingStopsEarly) {

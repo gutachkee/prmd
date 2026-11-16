@@ -9,9 +9,12 @@
 #include "prmd/internal/prmd_codec.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -396,11 +399,54 @@ BlockPlanes make_block(const Planes& stored,
   return bp;
 }
 
+// Coder scratch of the calling thread: coders append to (and may
+// over-allocate) this buffer, the payload keeps an exact-size copy.
+std::vector<uint8_t>& block_scratch() {
+  thread_local std::vector<uint8_t> scratch;
+  return scratch;
+}
+
+// Trims this thread's scratch after a block (also when the coder throws):
+// buffers that a huge code-block grew past kMaxKeptScratch are released.
+struct TrimBlockScratch {
+  TrimBlockScratch() = default;
+  TrimBlockScratch(const TrimBlockScratch&) = delete;
+  TrimBlockScratch& operator=(const TrimBlockScratch&) = delete;
+  ~TrimBlockScratch() {
+    std::vector<uint8_t>& s = block_scratch();
+    if (s.capacity() > kMaxKeptScratch) {
+      std::vector<uint8_t>().swap(s);
+    }
+  }
+};
+
+// Releases the calling thread's coder scratch when encode_blocks returns or
+// throws: after an encode the calling thread keeps no scratch (workers'
+// thread_local buffers end with their threads).
+struct ReleaseScratch {
+  ReleaseScratch() = default;
+  ReleaseScratch(const ReleaseScratch&) = delete;
+  ReleaseScratch& operator=(const ReleaseScratch&) = delete;
+  ~ReleaseScratch() {
+    std::vector<uint8_t>().swap(block_scratch());
+    release_coder_scratch();
+  }
+};
+
 // 3. Entropy-codes every present block into its own exact-size payload.
 // Blocks are pure functions of the stored planes, so they are coded in any
 // order on any thread; payloads and offsets are then laid out in block-id
 // order (coarsest level first). Ids of absent edge blocks get empty
 // payloads.
+//
+// Failures behave as in the serial encoder, which codes blocks in id order
+// and stops at the first that throws or that takes the data past
+// `max_data_bytes`. Workers stop taking blocks as soon as one block failed or
+// the payloads finished so far exceed the limit (so a huge input does not
+// hold every payload before it fails); then the blocks are walked in id
+// order, coding any skipped one on this thread, and the first failure in
+// that order is thrown: the same exception, or the same "exceeds 4 GiB"
+// error, at every thread count.
 EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
                             const std::vector<LevelGeom>& geom,
                             const LevelTransform* xf,
@@ -409,7 +455,9 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
                             int cblk,
                             int channels,
                             bool med,
+                            uint64_t max_data_bytes,
                             Pool* pool) {
+  const ReleaseScratch release_scratch;
   const int num_levels = int(geom.size());
 
   struct Job {
@@ -436,29 +484,59 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
 
   EncodedBlocks out;
   out.payloads.resize(jobs.size());
-  parallel_for(pool, jobs.size(), 1, [&](size_t b, size_t e) {
-    // Coders append to (and may over-allocate) this per-thread buffer;
-    // the payload keeps an exact-size copy.
-    thread_local std::vector<uint8_t> scratch;
-    for (size_t i = b; i < e; ++i) {
-      const Job& j = jobs[i];
-      BlockPlanes bp;
-      {
-        PRMD_TIMED("make_block");
-        bp = make_block(stored[size_t(j.level)], geom[size_t(j.level)], xf,
-                        cblk, channels, med, j.bx, j.by);
-      }
-      PRMD_TIMED("entropy_encode");
-      scratch.clear();
-      coder.encode(bp, scratch);
-      out.payloads[i].assign(scratch.begin(), scratch.end());
+  // Per job, written only by the thread that codes it: 1 = coded.
+  std::vector<uint8_t> coded(jobs.size(), 0);
+
+  const auto code = [&](size_t i) {
+    const TrimBlockScratch trim;
+    const Job& j = jobs[i];
+    BlockPlanes bp;
+    {
+      PRMD_TIMED("make_block");
+      bp = make_block(stored[size_t(j.level)], geom[size_t(j.level)], xf,
+                      cblk, channels, med, j.bx, j.by);
     }
-    if (scratch.capacity() > kMaxKeptScratch) {
-      std::vector<uint8_t>().swap(scratch);
+    PRMD_TIMED("entropy_encode");
+    std::vector<uint8_t>& scratch = block_scratch();
+    scratch.clear();
+    coder.encode(bp, scratch);
+    out.payloads[i].assign(scratch.begin(), scratch.end());
+    coded[i] = 1;
+  };
+
+  // Set once a block failed or the coded payloads exceed the limit: the
+  // blocks not started yet are skipped.
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> coded_bytes{0};
+  std::mutex fail_m;
+  size_t fail_index = SIZE_MAX;  // lowest job that threw; guarded by fail_m
+  std::exception_ptr fail;
+
+  parallel_for(pool, jobs.size(), 1, [&](size_t b, size_t e) {
+    for (size_t i = b; i < e; ++i) {
+      if (stop.load(std::memory_order_relaxed)) {
+        return;
+      }
+      try {
+        code(i);
+      } catch (...) {
+        const std::lock_guard<std::mutex> lock(fail_m);
+        if (i < fail_index) {
+          fail_index = i;
+          fail = std::current_exception();
+        }
+        stop.store(true, std::memory_order_relaxed);
+        return;
+      }
+      const uint64_t size = out.payloads[i].size();
+      if (coded_bytes.fetch_add(size, std::memory_order_relaxed) + size >
+          max_data_bytes) {
+        stop.store(true, std::memory_order_relaxed);
+      }
     }
   });
 
-  // Index, in id order.
+  // Index, in id order: the serial encoder's order of coding and checking.
   out.offsets.assign(size_t(total_blocks) + 1, 0);
   uint64_t pos = 0;
   size_t ji = 0;
@@ -468,9 +546,15 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
     for (uint32_t local = 0; local < g.num_ids; ++local) {
       const uint32_t id = g.first_block + local;
       if (ji < jobs.size() && jobs[ji].id == id) {
+        if (ji == fail_index) {
+          std::rethrow_exception(fail);
+        }
+        if (!coded[ji]) {
+          code(ji);  // skipped after a later failure: code it now
+        }
         pos += out.payloads[ji].size();
         ++ji;
-        if (pos > 0xFFFFFFFFull) {
+        if (pos > max_data_bytes) {
           throw std::runtime_error("encoded data exceeds 4 GiB");
         }
       }
@@ -583,7 +667,8 @@ uint64_t prmd_work_units(int width, int height, const EncodeOptions& o) {
 EncodeReport encode_prmd(const Image& src,
                          const std::string& path,
                          const EncodeOptions& opts,
-                         const BlockCoder* coder_override) {
+                         const BlockCoder* coder_override,
+                         uint64_t max_data_bytes) {
   PRMD_TIMED("encode_prmd");
   const auto start = Clock::now();
   validate_prmd_options(opts);
@@ -669,7 +754,7 @@ EncodeReport encode_prmd(const Image& src,
   {
     PRMD_TIMED("encode_blocks");
     blocks = encode_blocks(stored, geom, xf.get(), coder, total_blocks,
-                           opts.cblk, channels, opts.med, pool);
+                           opts.cblk, channels, opts.med, max_data_bytes, pool);
   }
   std::vector<Planes>().swap(stored);
   pool_owner.reset();  // all parallel work is done

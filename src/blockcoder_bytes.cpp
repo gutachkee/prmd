@@ -52,12 +52,18 @@ std::vector<uint8_t>& pack_scratch() {
   return buf;
 }
 
-void trim_pack_scratch() {
-  std::vector<uint8_t>& buf = pack_scratch();
-  if (buf.capacity() > kMaxKeptPack) {
-    std::vector<uint8_t>().swap(buf);
+// Trims the buffer when the coder returns, also when it throws.
+struct TrimPackScratch {
+  TrimPackScratch() = default;
+  TrimPackScratch(const TrimPackScratch&) = delete;
+  TrimPackScratch& operator=(const TrimPackScratch&) = delete;
+  ~TrimPackScratch() {
+    std::vector<uint8_t>& buf = pack_scratch();
+    if (buf.capacity() > kMaxKeptPack) {
+      std::vector<uint8_t>().swap(buf);
+    }
   }
-}
+};
 
 inline uint32_t zigzag_encode(int32_t v) {
   return (uint32_t(v) << 1) ^ uint32_t(v >> 31);
@@ -120,10 +126,10 @@ class RawBlockCoder final : public BlockCoder {
   Entropy id() const override { return Entropy::Raw; }
 
   void encode(const BlockPlanes& in, std::vector<uint8_t>& out) const override {
+    const TrimPackScratch trim;
     std::vector<uint8_t>& buf = pack_scratch();
     pack(in, buf);
     out.insert(out.end(), buf.begin(), buf.end());
-    trim_pack_scratch();
   }
 
   void decode(const uint8_t* data,
@@ -147,6 +153,7 @@ class ZstdBlockCoder final : public BlockCoder {
   // the bound: the encoder passes a reused per-thread buffer and keeps an
   // exact-size copy).
   void encode(const BlockPlanes& in, std::vector<uint8_t>& out) const override {
+    const TrimPackScratch trim;
     std::vector<uint8_t>& buf = pack_scratch();
     pack(in, buf);
 
@@ -160,7 +167,6 @@ class ZstdBlockCoder final : public BlockCoder {
       throw std::runtime_error(std::string("zstd: ") + ZSTD_getErrorName(r));
     }
     out.resize(start + r);
-    trim_pack_scratch();
   }
 
   void decode(const uint8_t* data,
@@ -190,6 +196,10 @@ std::unique_ptr<BlockCoder> make_zstd_coder(int level) {
 
 std::unique_ptr<BlockCoder> make_raw_coder() {
   return std::make_unique<RawBlockCoder>();
+}
+
+void release_coder_scratch() {
+  std::vector<uint8_t>().swap(pack_scratch());
 }
 
 }  // namespace prmd::internal
