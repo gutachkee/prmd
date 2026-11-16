@@ -16,6 +16,5 @@ compile_commands.json
 *.j2k
 crop*.png
 
-# Benchmark output: prmdbench writes reports and level samples to <build dir>/bench/
-# (covered by build/ above); bench_out/ is its fallback when built without CMake.
-bench_out/
+# Benchmark output: prmdbench writes reports and level samples to bench/ next to
+# its executable, i.e. <build dir>/bench/ (covered by build/ above).

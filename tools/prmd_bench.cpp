@@ -3,18 +3,16 @@
 //
 // usage: prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096]
 //                  [--color gray|rgb|both] [--codecs a,b,...]
-//                  [--out <build dir>/bench/results.md] [--workdir DIR]
+//                  [--out <exe dir>/bench/results.md] [--workdir DIR]
 //                  [--no-entropy-table] [--lossy]
 //
 // Everything the run produces goes next to --out: the report itself and the
-// level-3 sample PNGs in <dir of --out>/samples/. The default --out is in the
-// CMake build directory (PRMD_BENCH_OUT_DIR), which git ignores.
+// level-3 sample PNGs in <dir of --out>/samples/. The default --out is
+// bench/results.md in the executable's own directory, found at run time, so a
+// CMake build writes to the git-ignored <build dir>/bench/ and a copied build
+// directory still writes next to its own binary. No build path is compiled in.
 
 #include <unistd.h>
-
-#ifndef PRMD_BENCH_OUT_DIR
-#define PRMD_BENCH_OUT_DIR "bench_out"  // built outside CMake
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -272,9 +270,24 @@ std::string cpu_model() {
 // ----------------------------------------------------------------------------
 // Command line
 
+// Directory holding the running executable: /proc/self/exe (Linux), else
+// argv[0] if it names a path, else the current directory.
+fs::path exe_dir(const char* argv0) {
+  std::error_code ec;
+  fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+  if (ec || exe.empty()) {
+    const std::string a0 = argv0 ? argv0 : "";
+    if (a0.find('/') == std::string::npos) {
+      return fs::current_path(ec);  // found via PATH: location unknown
+    }
+    exe = fs::weakly_canonical(fs::absolute(a0, ec), ec);
+  }
+  return exe.parent_path();
+}
+
 struct Args {
   std::string image;
-  std::string out = PRMD_BENCH_OUT_DIR "/results.md";
+  std::string out;  // default: <exe dir>/bench/results.md, set in parse()
   std::string workdir;
   std::string color = "gray";
   int levels = 5;
@@ -293,6 +306,7 @@ struct Args {
 
 Args parse(int argc, char** argv) {
   Args a;
+  bool out_set = false;
   for (int i = 1; i < argc; ++i) {
     const std::string s = argv[i];
     auto next = [&]() -> std::string {
@@ -314,6 +328,7 @@ Args parse(int argc, char** argv) {
       a.color = next();
     } else if (s == "--out") {
       a.out = next();
+      out_set = true;
     } else if (s == "--workdir") {
       a.workdir = next();
     } else if (s == "--no-entropy-table") {
@@ -338,13 +353,17 @@ Args parse(int argc, char** argv) {
                  "usage: prmdbench <image> [--levels 5] [--iters 300] [--seed "
                  "1] [--size 4096]\n"
                  "                 [--color gray|rgb|both] [--codecs a,b,...] "
-                 "[--out " PRMD_BENCH_OUT_DIR "/results.md]\n"
+                 "[--out <exe dir>/bench/results.md]\n"
                  "                 [--workdir DIR] [--no-entropy-table] "
                  "[--lossy]\n");
     std::exit(1);
   }
   if (a.codecs.empty()) {
     a.codecs = kMainCodecs;
+  }
+  if (!out_set) {
+    a.out = (exe_dir(argc > 0 ? argv[0] : nullptr) / "bench" / "results.md")
+                .string();
   }
   return a;
 }

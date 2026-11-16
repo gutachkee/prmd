@@ -65,18 +65,15 @@ endif()
 add_executable(prmd tools/prmd_cli.cpp)
 target_link_libraries(prmd PRIVATE prmd_core)
 
-add_executable(prmdbench bench/prmdbench.cpp)
+add_executable(prmdbench tools/prmd_bench.cpp)
 target_link_libraries(prmdbench PRIVATE prmd_core)
-# Default --out: reports and samples stay in this build directory.
 # Report header states the real build type and flags.
 get_directory_property(PRMD_COMPILE_OPTS COMPILE_OPTIONS)
 list(JOIN PRMD_COMPILE_OPTS " " PRMD_COMPILE_OPTS_STR)
 string(TOUPPER "${CMAKE_BUILD_TYPE}" PRMD_BT_UPPER)
 string(STRIP "${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${PRMD_BT_UPPER}} ${PRMD_COMPILE_OPTS_STR}" PRMD_BUILD_DESC)
 string(REGEX REPLACE " +" " " PRMD_BUILD_DESC "${PRMD_BUILD_DESC}")
-target_compile_definitions(prmdbench PRIVATE
-  PRMD_BENCH_OUT_DIR="${CMAKE_BINARY_DIR}/bench"
-  PRMD_BUILD_DESC="${PRMD_BUILD_DESC}")
+target_compile_definitions(prmdbench PRIVATE PRMD_BUILD_DESC="${PRMD_BUILD_DESC}")
 
 add_executable(prmdpipeline tools/prmd_pipeline.cpp)
 target_link_libraries(prmdpipeline PRIVATE prmd_core)

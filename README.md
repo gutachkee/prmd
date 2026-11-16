@@ -119,7 +119,9 @@ a cached random-walk trajectory, full-level decode times, and PSNR of each codec
 the plain 2×2-mean pyramid.
 
 All benchmark output goes to the build directory, which is not tracked in git. The default
-`--out` is `<build dir>/bench/results.md` (here `build/bench/results.md`), and the samples go next
+`--out` is `bench/results.md` in the directory of the `prmdbench` executable, resolved at run time
+(here `build/bench/results.md`, whatever the current directory, and still next to the binary
+if `build/` is copied to another host), and the samples go next
 to the report in `build/bench/samples/`: the centre 256² of level 3, saved **once per level definition**
 (`haar`, `box`, `gauss`, `cdf53`, and each JPEG2000 tiling), for comparing aliasing and blur by eye.
 Codecs that share a definition, such as `naive` and `laplacian-box`, or a mode under any entropy
