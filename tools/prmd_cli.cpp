@@ -223,7 +223,11 @@ void print_report(const EncodeReport& r,
     }
   }
   std::printf("encode time     %.1f ms\n", r.encode_ms);
-  std::printf("threads         %d\n", r.threads);
+  // Only for a multithreaded encode: a serial one prints what the encoder
+  // printed before threading existed.
+  if (r.threads != 1) {
+    std::printf("threads         %d\n", r.threads);
+  }
 }
 
 int cmd_encode(int argc, char** argv) {

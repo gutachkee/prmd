@@ -231,3 +231,82 @@ TEST(Cli, ThreadsOption) {
                      "--codec", "j2k", "--levels", "3", "--threads", "4"}),
             0);
 }
+
+namespace {
+
+// The lines `prmd encode` printed (stdout and stderr of the last run_cli).
+std::vector<std::string> log_lines() {
+  const std::vector<char> b =
+      testutil::read_file(testutil::temp_path("cli.log").string());
+  std::vector<std::string> lines;
+  std::string cur;
+  for (const char c : b) {
+    if (c == '\n') {
+      lines.push_back(cur);
+      cur.clear();
+    } else {
+      cur += c;
+    }
+  }
+  if (!cur.empty()) {
+    lines.push_back(cur);
+  }
+  return lines;
+}
+
+// Each line's label: the report's labels are padded to 16 columns.
+std::vector<std::string> labels(const std::vector<std::string>& lines) {
+  std::vector<std::string> out;
+  for (const std::string& l : lines) {
+    out.push_back(l.substr(0, 16));
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(Cli, SerialEncodePrintsWhatItPrintedBeforeThreading) {
+  // --threads 1 prints exactly the report of the encoder before threading:
+  // no "threads" line. Labels and order are those of tools/prmd_cli.cpp on
+  // main (input, output, sizes, per-level bytes, encode time).
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_serial.prmd").string();
+  ASSERT_EQ(run_cli({"encode", f.png, out, "--levels", "3", "--threads", "1"}),
+            0);
+  const std::vector<std::string> serial = log_lines();
+  const std::vector<std::string> expected_labels = {
+      "input           ",
+      "output          ",
+      "file bytes      ",
+      "raw level 0     ",
+      "raw pyramid     ",
+      "  level 0 bytes ",
+      "  level 1 bytes ",
+      "  level 2 bytes ",
+      "encode time     ",
+  };
+  EXPECT_EQ(labels(serial), expected_labels);
+  ASSERT_EQ(serial.size(), expected_labels.size());
+  EXPECT_EQ(serial[0], "input           " + f.png + "  300x200 gray");
+  EXPECT_EQ(serial[1], "output          " + out);
+
+  // A small image under the automatic default is serial too: same report.
+  ASSERT_EQ(run_cli({"encode", f.png, out, "--levels", "3"}), 0);
+  std::vector<std::string> automatic = log_lines();
+  ASSERT_EQ(automatic.size(), serial.size());
+  // Everything but the time is identical.
+  for (size_t i = 0; i + 1 < serial.size(); ++i) {
+    EXPECT_EQ(automatic[i], serial[i]) << i;
+  }
+
+  // A multithreaded encode adds one line, and only that.
+  ASSERT_EQ(run_cli({"encode", f.png, out, "--levels", "3", "--cblk", "32",
+                     "--tile", "64", "--threads", "3"}),
+            0);
+  const std::vector<std::string> mt = log_lines();
+  ASSERT_FALSE(mt.empty());
+  EXPECT_EQ(mt.back(), "threads         3");
+  std::vector<std::string> mt_labels = labels(mt);
+  mt_labels.pop_back();
+  EXPECT_EQ(mt_labels, expected_labels);
+}
