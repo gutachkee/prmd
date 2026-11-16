@@ -123,6 +123,24 @@ TEST(Cli, UsageErrorsExitWithOne) {
   EXPECT_EQ(run_cli({"encode", f.png, out, "--levels", "0"}), 1);  // invalid
 }
 
+TEST(Cli, NoMedAndNoYcocgFlags) {
+  const CliFiles& f = files();
+  const std::string file = testutil::temp_path("cli_flags.prmd").string();
+  const std::string out = testutil::temp_path("cli_flags.png").string();
+  ASSERT_EQ(run_cli({"encode", f.png, file, "--levels", "3", "--mode", "naive",
+                     "--color", "rgb", "--no-med", "--no-ycocg"}),
+            0);
+  EXPECT_EQ(run_cli({"info", file}), 0);
+  ASSERT_EQ(run_cli(decode_args(file, "0", "100", "50", "130", "70", out)), 0);
+  EXPECT_EQ(load_image(out).pixels,
+            convert(f.src, ColorFormat::RGB8).crop({100, 50, 130, 70}).pixels);
+
+  // Flags take no value; J2K has neither step.
+  EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("c2.j2k").string(),
+                     "--codec", "j2k", "--no-med"}),
+            1);
+}
+
 TEST(Cli, InvalidNumbersAreUsageErrors) {
   const CliFiles& f = files();
   const std::string out = testutil::temp_path("cli_num.png").string();

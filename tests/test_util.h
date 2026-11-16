@@ -76,6 +76,8 @@ struct Config {
   prmd::Transform t;
   prmd::Downsampler d;
   prmd::Entropy e;
+  bool med = true;    // EncodeOptions::med
+  bool ycocg = true;  // EncodeOptions::ycocg
 };
 
 inline void PrintTo(const Config& c, std::ostream* os) {
@@ -95,6 +97,16 @@ inline const std::vector<Config>& prmd_configs() {
       {"naive", Transform::Independent, Downsampler::Box, Entropy::Zstd},
       {"haar_range", Transform::Haar, Downsampler::Box, Entropy::Range},
       {"cdf53_raw", Transform::Cdf53, Downsampler::Box, Entropy::Raw},
+      // --no-med / --no-ycocg: naive (every level base), a wavelet (base
+      // and detail levels) and laplacian (closed-loop color inverse).
+      {"naive_no_med", Transform::Independent, Downsampler::Box, Entropy::Zstd,
+       false, true},
+      {"naive_no_med_no_ycocg", Transform::Independent, Downsampler::Box,
+       Entropy::Zstd, false, false},
+      {"haar_no_med_no_ycocg_range", Transform::Haar, Downsampler::Box,
+       Entropy::Range, false, false},
+      {"laplacian_box_no_ycocg", Transform::Laplacian, Downsampler::Box,
+       Entropy::Zstd, true, false},
   };
   return c;
 }
@@ -110,6 +122,8 @@ inline prmd::EncodeOptions options_for(const Config& c,
   o.transform = c.t;
   o.downsampler = c.d;
   o.entropy = c.e;
+  o.med = c.med;
+  o.ycocg = c.ycocg;
   o.tile = tile;
   o.cblk = cblk;
   return o;

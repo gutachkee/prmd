@@ -666,7 +666,10 @@ TEST(Format, RejectsCorruptHeadersAndIndex) {
     }
     return bad;
   };
-  EXPECT_THROW(try_open(with_byte(30, 1)), FormatError);  // reserved
+  EXPECT_NO_THROW(try_open(with_byte(30, 1)));            // flag: no MED
+  EXPECT_THROW(try_open(with_byte(30, 2)), FormatError);  // no-YCoCg on gray
+  EXPECT_THROW(try_open(with_byte(30, 4)), FormatError);  // unknown flag
+  EXPECT_THROW(try_open(with_byte(31, 1)), FormatError);  // reserved
   EXPECT_THROW(try_open(with_byte(50, 1)), FormatError);  // reserved
   // A huge block count must be rejected before the index is allocated.
   EXPECT_THROW(try_open(with_u32(24, 0x3FFFFFF0u)), FormatError);
@@ -752,6 +755,54 @@ TEST(Format, DefaultEntropyCoderIsZstd) {
   r.entropy = Entropy::Range;
   encode_file(img, p, Codec::Prmd, r);
   EXPECT_EQ(open_decoder(p)->name(), "prmd/haar+range");
+}
+
+// --no-med / --no-ycocg are recorded in header byte 30 and shown in name().
+TEST(Format, MedAndYcocgFlagsAreRecorded) {
+  const auto p = testutil::temp_path("flags.prmd").string();
+  auto flags_byte = [&] { return uint8_t(testutil::read_file(p)[30]); };
+  auto encode = [&](ColorFormat f, bool med, bool ycocg) {
+    EncodeOptions o;
+    o.transform = Transform::Independent;
+    o.color = f;
+    o.med = med;
+    o.ycocg = ycocg;
+    encode_file(ref::synthetic_image(200, 150, f, 5), p, Codec::Prmd, o);
+  };
+
+  encode(ColorFormat::RGB8, true, true);
+  EXPECT_EQ(flags_byte(), 0);
+  EXPECT_EQ(open_decoder(p)->name(), "prmd/naive-box");
+
+  encode(ColorFormat::RGB8, false, false);
+  EXPECT_EQ(flags_byte(), internal::kFlagNoMed | internal::kFlagNoYcocg);
+  EXPECT_EQ(open_decoder(p)->name(), "prmd/naive-box/no-med/no-ycocg");
+
+  encode(ColorFormat::RGB8, true, false);
+  EXPECT_EQ(flags_byte(), internal::kFlagNoYcocg);
+
+  // Gray has no color transform: ycocg = false is ignored, not recorded.
+  encode(ColorFormat::Gray8, false, false);
+  EXPECT_EQ(flags_byte(), internal::kFlagNoMed);
+  EXPECT_EQ(open_decoder(p)->name(), "prmd/naive-box/no-med");
+}
+
+// MED is what makes naive's blocks small. (YCoCg-R is not asserted: the
+// synthetic image's channels are phase-shifted, not correlated like a
+// photo's, and YCoCg-R makes it larger.)
+TEST(Format, MedShrinksNaive) {
+  const Image img = ref::synthetic_image(512, 384, ColorFormat::RGB8, 11);
+  const auto p = testutil::temp_path("shrink.prmd").string();
+  auto size = [&](bool med, bool ycocg) {
+    EncodeOptions o;
+    o.transform = Transform::Independent;
+    o.color = ColorFormat::RGB8;
+    o.med = med;
+    o.ycocg = ycocg;
+    return encode_file(img, p, Codec::Prmd, o).file_bytes;
+  };
+  EXPECT_LT(size(true, true), size(false, true));
+  EXPECT_LT(size(true, false), size(false, false));
 }
 
 TEST(Format, HaarAndCdf53AreSmallerThanNaive) {

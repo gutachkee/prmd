@@ -6,6 +6,10 @@
 //                  [--out <exe dir>/bench/results.md] [--workdir DIR]
 //                  [--no-entropy-table] [--lossy]
 //
+// The naive-no-med / naive-no-ycocg / naive-no-med-no-ycocg codecs are the
+// naive mode with --no-med / --no-ycocg; they run only when --codecs names
+// them.
+//
 // Everything the run produces goes next to --out: the report itself and the
 // level-3 sample PNGs in <dir of --out>/samples/. The default --out is
 // bench/results.md in the executable's own directory, found at run time, so a
@@ -80,6 +84,13 @@ std::vector<CodecSpec> all_specs(int levels, ColorFormat color) {
     return CodecSpec{n, Codec::Prmd,
                      make_prmd_options(levels, color, t, d, e, lvl)};
   };
+  // naive with MED and/or YCoCg-R turned off.
+  auto naive_without = [&](const char* n, bool med, bool ycocg) {
+    CodecSpec s = prmd(n, Transform::Independent, Downsampler::Box);
+    s.opt.med = med;
+    s.opt.ycocg = ycocg;
+    return s;
+  };
   auto j2k = [&](const char* n, int tile) {
     return CodecSpec{n, Codec::J2K, make_j2k_options(levels, color, tile)};
   };
@@ -107,6 +118,9 @@ std::vector<CodecSpec> all_specs(int levels, ColorFormat color) {
       prmd("naive+zstd19", kNaive, kBox, Entropy::Zstd, 19),
       prmd("naive+range", kNaive, kBox, Entropy::Range),
       prmd("naive+raw", kNaive, kBox, Entropy::Raw),
+      naive_without("naive-no-med", false, true),
+      naive_without("naive-no-ycocg", true, false),
+      naive_without("naive-no-med-no-ycocg", false, false),
   };
 }
 

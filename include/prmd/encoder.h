@@ -55,6 +55,12 @@ struct EncodeOptions {
   Entropy entropy = Entropy::Zstd;
   // 0 = coder default. Zstd: 1..22 (default 1). Range, Raw: must be 0.
   int entropy_level = 0;
+  // MED prediction on base blocks (the coarsest level; every level for
+  // naive). Off: base blocks store pixel values as they are.
+  bool med = true;
+  // YCoCg-R on every stored plane of an RGB file. Off: R, G, B are stored as
+  // they are. Ignored for gray, which has no color transform.
+  bool ycocg = true;
 
   // J2K
   int j2k_tile = 256;

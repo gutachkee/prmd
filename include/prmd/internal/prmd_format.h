@@ -30,8 +30,15 @@ struct PrmdHeader {
   uint32_t total_blocks = 0;
   Entropy entropy = Entropy::Range;
   uint8_t entropy_level = 0;
+  // Header byte 30 (flags); a set bit turns a step off, so 0 = both on.
+  bool med = true;    // bit 0 clear: MED on base blocks
+  bool ycocg = true;  // bit 1 clear: YCoCg-R on RGB (always set for gray)
   uint64_t data_offset = 0;
 };
+
+// Header byte 30.
+constexpr uint8_t kFlagNoMed = 1u << 0;
+constexpr uint8_t kFlagNoYcocg = 1u << 1;
 
 struct LevelEntry {
   uint32_t width = 0;
@@ -56,7 +63,8 @@ struct LevelGeom {
   uint32_t first_block = 0;
   // tiles_x*tiles_y*k*k (ids of absent edge blocks are empty).
   uint32_t num_ids = 0;
-  // Stored directly (MED) rather than as detail/residual.
+  // Stored as pixel values (MED-predicted unless off) rather than as
+  // detail/residual.
   bool base = false;
 };
 

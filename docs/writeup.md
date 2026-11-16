@@ -49,7 +49,7 @@ Gray 4096², 5 levels, lossless, zstd 1, 300 random crops per row, one core, fil
 
 Mean / p95 latency and bytes read per crop (block data, not counting the index):
 
-| crop | level | haar | naive | JPEG2000 | bytes: haar · naive · J2K |
+| crop | level | haar | naive | JPEG2000 | bytes read: haar · naive · J2K |
 |---|---:|---:|---:|---:|---:|
 | 256² | L0 | 0.59 / 0.68 ms | 0.55 / 0.58 ms | 13.5 / 15.2 ms | 154 KiB · 101 KiB · 191 KiB |
 | 256² | L2 | 0.53 / 0.66 ms | 0.53 / 0.58 ms | 8.8 / 9.3 ms | 129 KiB · 99 KiB · 1.2 MiB |

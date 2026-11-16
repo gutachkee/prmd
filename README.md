@@ -84,6 +84,8 @@ build/prmd info img.prmd
 | `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~12× slower decode; ~10× on a Pi 5), `raw` | `zstd` — see [design.md §7.1](docs/design.md) |
 | `--entropy-level` | zstd level 1–22. 19 encodes 4–34× slower (mode-dependent); it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller ([design.md §7.2](docs/design.md)) | 1 |
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
+| `--no-med` | store base-block pixels as they are, without MED prediction (the coarsest level; every level for `naive`). Faster crops, larger file: gray `naive` +23%, crops about 1.5× faster ([benchmarks.md](docs/benchmarks.md)) | MED on |
+| `--no-ycocg` | store R, G, B as they are, without YCoCg-R (`rgb` only; ignored for gray) | YCoCg-R on |
 | `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
 
 Exit codes: 0 ok, 1 usage, 2 I/O error, 3 format error, 4 out of range.

@@ -23,8 +23,8 @@ namespace prmd::internal {
 namespace {
 
 // Decoded samples of one code-block: one Region per (band, channel),
-// band-major. For Base blocks the Regions are pixel values (MED and YCoCg-R
-// already undone).
+// band-major. For Base blocks the Regions are pixel values (MED and YCoCg-R,
+// where the file uses them, already undone).
 struct DecodedBlock {
   std::vector<Region> planes;
 
@@ -114,6 +114,12 @@ class PrmdDecoder final : public CropDecoder {
     }
     if (h_.quant > 0) {
       n += "/q" + std::to_string(h_.quant);
+    }
+    if (!h_.med) {
+      n += "/no-med";
+    }
+    if (!h_.ycocg) {
+      n += "/no-ycocg";
     }
     return n;
   }
@@ -350,7 +356,7 @@ class PrmdDecoder final : public CropDecoder {
 
   // Inverts the per-sample steps applied after the transform for band `b`
   // (planes b*C .. b*C+C-1): dequantization (detail) or MED (base), then
-  // YCoCg-R.
+  // YCoCg-R. MED and YCoCg-R are skipped when the header turns them off.
   void undo_block_coding(bool base,
                          int b,
                          const Rect& samples,
@@ -359,12 +365,14 @@ class PrmdDecoder final : public CropDecoder {
     const size_t n = size_t(samples.w) * size_t(samples.h);
 
     if (base) {
-      PRMD_TIMED("med_reconstruct");
-      for (int c = 0; c < channels_; ++c) {
-        std::vector<int32_t> px(n);
-        med_reconstruct(bp.planes[first + size_t(c)].data(), samples.w,
-                        samples.h, px.data());
-        bp.planes[first + size_t(c)].swap(px);
+      if (h_.med) {
+        PRMD_TIMED("med_reconstruct");
+        for (int c = 0; c < channels_; ++c) {
+          std::vector<int32_t> px(n);
+          med_reconstruct(bp.planes[first + size_t(c)].data(), samples.w,
+                          samples.h, px.data());
+          bp.planes[first + size_t(c)].swap(px);
+        }
       }
     } else {
       const int step = band_step(xf_->band_kind(b), h_.quant);
@@ -378,7 +386,7 @@ class PrmdDecoder final : public CropDecoder {
       }
     }
 
-    if (channels_ == 3) {
+    if (h_.ycocg && channels_ == 3) {
       PRMD_TIMED("ycocg_inverse");
       ycocg_r_inverse(bp.planes[first].data(), bp.planes[first + 1].data(),
                       bp.planes[first + 2].data(), n);

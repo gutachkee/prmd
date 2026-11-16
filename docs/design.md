@@ -206,6 +206,9 @@ struct EncodeOptions {
   Entropy entropy = Entropy::Zstd;   // block payload coder (§7); default chosen in §7.1
   int entropy_level = 0;             // coder-specific effort; 0 = coder default.
                                      //   Zstd: 1..22 (default 1). Range, Raw: must be 0.
+  bool med = true;                   // MED on base blocks (§3.3); false stores pixel values
+  bool ycocg = true;                 // YCoCg-R on RGB (§5.1); false stores R, G, B. Ignored
+                                     //   for gray. Both are recorded in header byte 30 (§3.1)
   // J2K
   int   j2k_tile = 256;              // full-resolution tile size (benchmarked: 256, 1024)
   int   j2k_cblk = 64;
@@ -383,7 +386,8 @@ class BlockCoder {
 std::unique_ptr<BlockCoder> make_block_coder(Entropy e, int level = 0);
 
 // MED (LOCO-I) prediction for Band::Base on int32 samples, causal within the w×h block only
-// (first sample predicted as 0). Applied after YCoCg-R for RGB.
+// (first sample predicted as 0). Applied after YCoCg-R for RGB. Skipped when the file's
+// no-MED flag is set (§3.1).
 void med_residual(const int32_t* px, int w, int h, int32_t* res);
 void med_reconstruct(const int32_t* res, int w, int h, int32_t* px);
 }
@@ -468,18 +472,19 @@ offset 0  ┌──────────────────────�
 | 24 | u32 | total_blocks | |
 | 28 | u8 | entropy | `Entropy` id: 0 = range, 1 = zstd, 2 = raw. An unknown id raises `FormatError` |
 | 29 | u8 | entropy_level | informational (as encoded; 0 = coder default) |
-| 30 | u8[2] | reserved | 0 |
+| 30 | u8 | flags | bit 0 = no MED (base blocks store pixel values), bit 1 = no YCoCg-R (RGB stores R, G, B); 0 = both on. Other bits must be 0, and bit 1 must be 0 for gray |
+| 31 | u8 | reserved | 0 |
 | 32 | u64 | data_offset | |
 | 40 | u8[24] | reserved | 0 |
 
-There is no checksum. On open the decoder validates the header fields (reserved bytes must be 0; geometry via `geometry_error`, in 64-bit; `total_blocks` must equal the count derived from the geometry, checked before the index is allocated; `data_offset` must not exceed the file size before the index is read), the level table (must equal the geometry derived from the header), the offsets (start at 0, monotonic) and the file size (must equal `data_offset` + last offset). This stops a damaged file from crashing the decoder or reading outside the file. Detecting bit-level corruption is left to the storage layer: a checksum on the index alone would protect 5 KB of an 11 MB file, and a damaged payload can still decode to wrong pixels without an error.
+There is no checksum. On open the decoder validates the header fields (reserved bytes and unknown flag bits must be 0, and gray files must not set no-YCoCg-R; geometry via `geometry_error`, in 64-bit; `total_blocks` must equal the count derived from the geometry, checked before the index is allocated; `data_offset` must not exceed the file size before the index is read), the level table (must equal the geometry derived from the header), the offsets (start at 0, monotonic) and the file size (must equal `data_offset` + last offset). This stops a damaged file from crashing the decoder or reading outside the file. Detecting bit-level corruption is left to the storage layer: a checksum on the index alone would protect 5 KB of an 11 MB file, and a damaged payload can still decode to wrong pixels without an error.
 
 ### 3.2 Level entry (16 bytes)
 `u32 width, u32 height, u16 blocks_x, u16 blocks_y, u32 first_block` plus an implicit kind: `Base` for level N−1 (and for every level when `transform = independent`), otherwise `Detail`.
 
 ### 3.3 Blocks and tiles
 - A **code-block** covers `cblk × cblk` pixels of *its own level* (edge blocks are smaller). It is the unit of entropy coding, I/O and caching.
-  - Base block: 1 plane per channel (MED residuals) of the block's pixel size.
+  - Base block: 1 plane per channel of the block's pixel size: MED residuals, or the pixel values themselves when the file's no-MED flag is set (`--no-med`).
   - Detail block, haar/cdf53: 3 planes (LH, HL, HH) per channel, each `ceil(bw/2) × ceil(bh/2)`.
   - Detail block, laplacian: 1 plane (Residual) per channel, `bw × bh`.
   - All channels of an area live in the **same** block, so RGB needs no extra index entries or reads.
@@ -500,6 +505,7 @@ prmd encode <in.jpg|in.png> <out> [--codec prmd|j2k] [--color gray|rgb]   (defau
            [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
            [--levels 5] [--tile 256] [--cblk 128] [--quant Q]
            [--entropy zstd|range|raw] [--entropy-level N]   (default zstd, level 1)
+           [--no-med] [--no-ycocg]                           (.prmd only; default both on)
            [--j2k-tile 256] [--j2k-lossy-psnr DB]
         → prints EncodeReport (size, ratio vs raw L0 and raw pyramid, per-level bytes, time)
 
@@ -564,6 +570,7 @@ Only D's *output* is stored, so the decoder never runs D. It needs U plus the he
 - **Storage:** the encoder computes each channel's base pixels and detail or residual coefficients exactly as for gray, then applies the reversible **YCoCg-R** transform to each co-located triplet (R, G, B → Y, Co, Cg) before entropy coding. The decoder inverts YCoCg-R right after entropy decoding.
 - **Why it is lossless:** YCoCg-R is exactly reversible on any integers, so the level definition stays "per-channel RGB" and stays bit-exact, while the shared structure between channels is removed (chroma planes are near zero). Values grow by at most 1 bit, which int32 holds easily.
 - **Contexts:** separate context sets for Y and for Co/Cg.
+- **Turning it off:** `--no-ycocg` (`EncodeOptions::ycocg = false`) stores R, G and B as they are, at every level and band, and sets bit 1 of header byte 30 so the decoder skips the inverse. It is for measuring what YCoCg-R buys: on the test image, RGB `naive` is 27.9% larger without it. Gray has no color transform, so the option is ignored there and never recorded. `--no-med` (bit 0) works the same way for MED on base blocks; benchmarks in [benchmarks.md](benchmarks.md).
 
 ### 5.2 Lossy mode (`quant` = Q > 0)
 - **Quantizer:** uniform with rounding, `idx = sign(v)·⌊(|v| + Q/2)/Q⌋`, reconstructed as `idx·Q`, so each value is off by at most Q/2. The indices are what gets entropy-coded; the decoder dequantizes right after entropy decoding. For RGB, quantization happens after YCoCg-R, i.e. on Y/Co/Cg.
@@ -754,9 +761,9 @@ The rest of this section describes the **`range`** coder.
 | `test_rangecoder.cpp` | round-trip of random, skewed and all-zero bit streams; `encode_direct` at every width; carry-propagation stress; skewed data compresses near entropy; truncated input sets `overrun()` without crashing |
 | `test_transform.cpp` | `build_pyramid` equals the independent `tests/reference.cpp` for every mode × gray/RGB × odd sizes (1×9, 2×3, 101×77, 257×130); forward/inverse identity for each transform incl. values outside 0–255; region inverse equals full inverse **and depends only on `*_needed` samples** (everything else overwritten with garbage) |
 | `test_blockcoder.cpp` | parameterised over every `Entropy`: round-trip of random, Laplacian-distributed and extreme values for every `Band` and 1/3 channels; truncated payload → `FormatError`; full int32 magnitudes for range; out-of-int16 → zstd/raw throw; YCoCg-R and MED round-trip |
-| `test_codec.cpp` | **crop matrix** for 7 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+range, cdf53+raw) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, reserved bytes, huge block count, huge dimensions, too-small cblk, level table, truncation) and option validation (including geometry the level table can't hold); bounds with coordinates near `INT_MAX`; haar and cdf53 smaller than naive; **LRU eviction** (a 300 KiB budget, far below the working set, over 250 random crops at every level: all exact, and an evicted crop is decoded again); **corrupt payloads** with a valid index, for every config and so every coder: random bytes in every block (gray and RGB) never crash and zstd rejects every level, and blocks cut by 1 byte, half or all of their payload give `FormatError` for zstd and raw (range: no crash). These run clean under ASan + UBSan |
+| `test_codec.cpp` | **crop matrix** for 11 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+range, cdf53+raw, naive without MED, naive without MED and YCoCg-R, haar+range without both, laplacian-box without YCoCg-R) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, flag bits, reserved bytes, huge block count, huge dimensions, too-small cblk, level table, truncation) and option validation (including geometry the level table can't hold); bounds with coordinates near `INT_MAX`; haar and cdf53 smaller than naive; the MED/YCoCg-R flags recorded in byte 30 (and not recorded for gray), and MED making naive smaller; **LRU eviction** (a 300 KiB budget, far below the working set, over 250 random crops at every level: all exact, and an evicted crop is decoded again); **corrupt payloads** with a valid index, for every config and so every coder: random bytes in every block (gray and RGB) never crash and zstd rejects every level, and blocks cut by 1 byte, half or all of their payload give `FormatError` for zstd and raw (range: no crash). These run clean under ASan + UBSan |
 | `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+range × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
-| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection |
+| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection; `--no-med --no-ycocg` encodes, decodes exactly and is rejected for J2K |
 | `test_j2k.cpp` | gray/RGB × 256/1024 tiles: L0 lossless vs source; 150 random crops + edges/corners at every level vs J2K's own full-level decode; TLM single-tile crop reads < ¼ of the file; bounds |
 
 **Random-access proof** (`test_codec.cpp`, every .prmd config):

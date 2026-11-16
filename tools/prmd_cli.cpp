@@ -35,6 +35,7 @@ const char* kUsage = R"(usage:
               [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
               [--levels 5] [--tile 256] [--cblk 128] [--quant Q]
               [--entropy zstd|range|raw] [--entropy-level N]
+              [--no-med] [--no-ycocg]
               [--j2k-tile 256] [--j2k-lossy-psnr DB]
   prmd decode <file> --level L --x X --y Y --w W --h H -o crop.png [--clamp] [--stats]
   prmd info <file>
@@ -179,6 +180,9 @@ EncodeOptions parse_encode_options(const Args& a) {
                                      {"zstd", Entropy::Zstd},
                                      {"raw", Entropy::Raw}});
 
+  o.med = !a.flag("no-med");
+  o.ycocg = !a.flag("no-ycocg");
+
   if (a.has("j2k-lossy-psnr")) {
     o.j2k_lossless = false;
     o.j2k_psnr = a.real("j2k-lossy-psnr");
@@ -215,7 +219,7 @@ void print_report(const EncodeReport& r,
 }
 
 int cmd_encode(int argc, char** argv) {
-  Args a(argc, argv, 2, {});
+  Args a(argc, argv, 2, {"no-med", "no-ycocg"});
   a.check_known({"codec", "color", "mode", "down", "levels", "tile", "cblk",
                  "quant", "entropy", "entropy-level", "j2k-tile",
                  "j2k-lossy-psnr"});
@@ -226,6 +230,9 @@ int cmd_encode(int argc, char** argv) {
   const EncodeOptions o = parse_encode_options(a);
   const Codec codec = parse_choice<Codec>(
       a, "codec", "prmd", {{"prmd", Codec::Prmd}, {"j2k", Codec::J2K}});
+  if (codec == Codec::J2K && (a.flag("no-med") || a.flag("no-ycocg"))) {
+    throw UsageError("--no-med and --no-ycocg apply to --codec prmd only");
+  }
 
   const Image src = load_image(a.pos[0]);
   std::printf("input           %s  %dx%d %s\n", a.pos[0].c_str(), src.width,
@@ -345,6 +352,10 @@ int cmd_info(int argc, char** argv) {
     }
     std::printf("quant           %d%s\n", h.quant,
                 h.quant ? " (lossy)" : " (lossless)");
+    std::printf("MED             %s\n", h.med ? "on" : "off");
+    if (channels(h.color) == 3) {
+      std::printf("YCoCg-R         %s\n", h.ycocg ? "on" : "off");
+    }
   }
 
   for (int level = 0; level < dec->num_levels(); ++level) {

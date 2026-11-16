@@ -46,16 +46,17 @@ std::vector<int32_t> extract(const Region& plane, const Rect& r) {
   return out;
 }
 
-// YCoCg-R on planes[first .. first+2]; no-op unless there are 3 channels.
-void color_forward(Planes& p, size_t first, int channels) {
-  if (channels == 3) {
+// YCoCg-R on planes[first .. first+2]; no-op unless `ycocg` is set and there
+// are 3 channels.
+void color_forward(Planes& p, size_t first, int channels, bool ycocg) {
+  if (ycocg && channels == 3) {
     ycocg_r_forward(p[first].v.data(), p[first + 1].v.data(),
                     p[first + 2].v.data(), p[first].v.size());
   }
 }
 
-void color_inverse(Planes& p, size_t first, int channels) {
-  if (channels == 3) {
+void color_inverse(Planes& p, size_t first, int channels, bool ycocg) {
+  if (ycocg && channels == 3) {
     ycocg_r_inverse(p[first].v.data(), p[first + 1].v.data(),
                     p[first + 2].v.data(), p[first].v.size());
   }
@@ -119,6 +120,7 @@ void store_wavelet_bands(const Decomposition& pyr,
                          const LevelTransform& xf,
                          int channels,
                          int quant,
+                         bool ycocg,
                          std::vector<Planes>& stored) {
   const int num_levels = int(pyr.levels.size());
   for (int level = 0; level + 1 < num_levels; ++level) {
@@ -133,7 +135,7 @@ void store_wavelet_bands(const Decomposition& pyr,
       const size_t first = size_t(b * channels);
       {
         PRMD_TIMED("ycocg_forward");
-        color_forward(dst, first, channels);
+        color_forward(dst, first, channels, ycocg);
       }
       {
         PRMD_TIMED("quantize");
@@ -152,6 +154,7 @@ void store_laplacian_residuals(const Decomposition& pyr,
                                const LevelTransform& xf,
                                int channels,
                                int quant,
+                               bool ycocg,
                                std::vector<Planes>& stored) {
   const int num_levels = int(pyr.levels.size());
   const int step = band_step(Band::Residual, quant);
@@ -180,7 +183,7 @@ void store_laplacian_residuals(const Decomposition& pyr,
 
     {
       PRMD_TIMED("ycocg_forward");
-      color_forward(res, 0, channels);
+      color_forward(res, 0, channels, ycocg);
     }
     {
       PRMD_TIMED("quantize");
@@ -199,7 +202,7 @@ void store_laplacian_residuals(const Decomposition& pyr,
     }
     {
       PRMD_TIMED("ycocg_inverse");
-      color_inverse(res, 0, channels);
+      color_inverse(res, 0, channels, ycocg);
     }
     PRMD_TIMED("reconstruct_upsample");
     Planes next(static_cast<size_t>(channels));
@@ -212,8 +215,9 @@ void store_laplacian_residuals(const Decomposition& pyr,
 }
 
 // 2. What is actually stored, as whole planes: stored[level][band*C + c].
-//    Base levels: pixels (YCoCg-R for RGB); MED is applied per block later.
-//    Detail levels: bands → YCoCg-R (RGB) → quantize. Both steps are per
+//    Base levels: pixels (YCoCg-R for RGB unless off); MED, unless off, is
+//    applied per block later.
+//    Detail levels: bands → YCoCg-R (RGB, unless off) → quantize. Both steps are per
 //    sample, so doing them on whole planes is identical to doing them per
 //    block.
 std::vector<Planes> stored_planes(const Decomposition& pyr,
@@ -228,7 +232,7 @@ std::vector<Planes> stored_planes(const Decomposition& pyr,
     if (geom[size_t(level)].base) {
       PRMD_TIMED("copy_base");
       stored[size_t(level)] = pyr.levels[size_t(level)];
-      color_forward(stored[size_t(level)], 0, channels);
+      color_forward(stored[size_t(level)], 0, channels, opts.ycocg);
     }
   }
 
@@ -237,21 +241,23 @@ std::vector<Planes> stored_planes(const Decomposition& pyr,
   }
   if (opts.transform == Transform::Laplacian) {
     PRMD_TIMED("laplacian_residuals");
-    store_laplacian_residuals(pyr, geom, *xf, channels, opts.quant, stored);
+    store_laplacian_residuals(pyr, geom, *xf, channels, opts.quant,
+                              opts.ycocg, stored);
   } else {
     PRMD_TIMED("wavelet_bands");
-    store_wavelet_bands(pyr, *xf, channels, opts.quant, stored);
+    store_wavelet_bands(pyr, *xf, channels, opts.quant, opts.ycocg, stored);
   }
   return stored;
 }
 
-// Samples of block (bx, by): MED residuals of the pixels for base levels,
-// the band samples under the block for detail levels.
+// Samples of block (bx, by): for base levels the pixels, as MED residuals
+// when `med` is set; for detail levels the band samples under the block.
 BlockPlanes make_block(const Planes& stored,
                        const LevelGeom& g,
                        const LevelTransform* xf,
                        int cblk,
                        int channels,
+                       bool med,
                        int bx,
                        int by) {
   const Rect pixels = block_pixel_rect(g, cblk, bx, by);
@@ -267,10 +273,13 @@ BlockPlanes make_block(const Planes& stored,
         PRMD_TIMED("extract");
         px = extract(stored[size_t(c)], pixels);
       }
-      PRMD_TIMED("med_residual");
-      std::vector<int32_t> res(px.size());
-      med_residual(px.data(), pixels.w, pixels.h, res.data());
-      bp.planes.push_back(std::move(res));
+      if (med) {
+        PRMD_TIMED("med_residual");
+        std::vector<int32_t> res(px.size());
+        med_residual(px.data(), pixels.w, pixels.h, res.data());
+        px.swap(res);
+      }
+      bp.planes.push_back(std::move(px));
       bp.kinds.push_back(Band::Base);
     }
     return bp;
@@ -297,7 +306,8 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
                             const BlockCoder& coder,
                             uint32_t total_blocks,
                             int cblk,
-                            int channels) {
+                            int channels,
+                            bool med) {
   EncodedBlocks out;
   out.offsets.assign(size_t(total_blocks) + 1, 0);
   const int num_levels = int(geom.size());
@@ -319,7 +329,8 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
         BlockPlanes bp;
         {
           PRMD_TIMED("make_block");
-          bp = make_block(stored[size_t(level)], g, xf, cblk, channels, bx, by);
+          bp = make_block(stored[size_t(level)], g, xf, cblk, channels, med,
+                          bx, by);
         }
         PRMD_TIMED("entropy_encode");
         coder.encode(bp, out.data);
@@ -350,6 +361,10 @@ PrmdHeader make_header(const EncodeOptions& opts,
   h.total_blocks = total_blocks;
   h.entropy = opts.entropy;
   h.entropy_level = uint8_t(opts.entropy_level);
+  h.med = opts.med;
+  // Gray has no color transform; recording "off" would give one image two
+  // encodings.
+  h.ycocg = opts.ycocg || src.channels() != 3;
   return h;
 }
 
@@ -462,7 +477,7 @@ EncodeReport encode_prmd(const Image& src_in,
   {
     PRMD_TIMED("encode_blocks");
     blocks = encode_blocks(stored, geom, xf.get(), *coder, total_blocks,
-                           opts.cblk, channels);
+                           opts.cblk, channels, opts.med);
   }
 
   PrmdHeader header = make_header(opts, src, total_blocks);

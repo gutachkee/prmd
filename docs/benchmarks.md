@@ -14,7 +14,10 @@ All numbers come from `prmdbench` (commands in the README): the aerial test JPEG
 | **cdf53** | 11.18 MiB | 1.43× smaller | 1.91× smaller | **−25.7%** |
 | laplacian-gauss | 14.29 MiB | 1.12× smaller | 1.49× smaller | −5.0% |
 | naive (same coder) | 15.04 MiB | 1.06× smaller | 1.42× smaller | 0 |
+| naive, `--no-med --no-ycocg`² | 18.52 MiB | 1.16× larger | 1.15× smaller | +23.1% |
 | JPEG2000, 256² tiles | 10.84 MiB | 1.48× smaller | 1.97× smaller | −27.9% |
+
+² From a separate `prmdbench` run on the same machine (2026-11-16, `--no-entropy-table --codecs naive,naive-no-med`), whose plain `naive` matched the figures here within 5%. On gray, `--no-ycocg` has no effect (there is no color transform), so this is `naive` without MED: base blocks store the pixel values themselves.
 
 ## Per-crop latency and I/O
 
@@ -45,9 +48,12 @@ Encode covers building and writing the whole 5-level pyramid of the 4096² image
 | `laplacian-box` | 218 ms¹ | 0.80 / 0.90 ms | 2.28 / 2.57 ms | 116 ms | 26.8 ms |
 | `laplacian-gauss` | 250 ms¹ | 0.75 / 0.85 ms | 2.09 / 2.25 ms | 109 ms | 23.5 ms |
 | `naive` | 104 ms | 0.55 / 0.58 ms | 1.67 / 1.89 ms | 79 ms | 18.9 ms |
+| `naive --no-med --no-ycocg`² | 96 ms | 0.37 / 0.46 ms | 1.07 / 1.26 ms | 55.5 ms | 13.3 ms |
 | JPEG2000, 256² tiles | 1453 ms | 13.5 / 15.2 ms | 37.5 / 44.4 ms | 1341 ms | 361 ms |
 
 ¹ Measured after the encoder stopped computing the `laplacian` residuals twice; before, 282 ms and 299 ms. Files are byte-identical.
+
+Without MED, `naive` crops decode about 1.5× faster (0.37 ms against 0.57 ms for plain `naive` in the same run) for a 23% larger file, and they are then faster than `haar`'s, whose file is 37% smaller.
 
 At zstd level 1, most of the encode time is the transform, so `haar` and `naive` encode 3–4× faster than `cdf53` and 2–3× faster than `laplacian`. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3–1.5× slower.
 
@@ -87,9 +93,12 @@ Same image and setup, converted to RGB8 (raw L0 48.00 MiB, raw pyramid 63.94 MiB
 | laplacian-box | 31.96 MiB | 15.98 | 1.50× smaller | 2.00× smaller | +3.6% | 751 ms |
 | laplacian-gauss | 32.38 MiB | 16.19 | 1.48× smaller | 1.98× smaller | +5.0% | 824 ms |
 | naive (same coder) | 30.84 MiB | 15.42 | 1.56× smaller | 2.07× smaller | 0 | 351 ms |
+| naive, `--no-med --no-ycocg`³ | 57.83 MiB | 28.92 | 1.20× larger | 1.11× smaller | +87.5% | 274 ms |
 | haar, zstd 19 | 22.92 MiB | 11.46 | 2.09× smaller | 2.79× smaller | −25.7% | 8855 ms |
 | haar, range coder | **20.52 MiB** | 10.26 | 2.34× smaller | 3.12× smaller | −33.5% | 1092 ms |
 | JPEG2000, 256² tiles | 20.98 MiB | 10.49 | 2.29× smaller | 3.05× smaller | −32.0% | 2883 ms |
+
+³ From a separate `prmdbench` run on the same machine (2026-11-16, `--codecs naive,naive-no-med,naive-no-ycocg,naive-no-med-no-ycocg`), whose plain `naive` matched the figures here within 6%. Base blocks store raw R, G and B values, with neither MED nor YCoCg-R.
 
 Unlike gray, `cdf53` is larger than `haar` on RGB, and both `laplacian` variants are larger than `naive`: presumably their ~1.33× residual samples cost more than the cross-level prediction saves on the chroma planes (not investigated). On RGB, zstd files are 12–17% larger than with the range coder (12% at level 19, 17% at level 1), so JPEG2000 is smaller than the default `.prmd` RGB file; `haar+range` is still the smallest.
 
@@ -116,9 +125,12 @@ An RGB crop costs about 3× a gray one (three planes plus the YCoCg-R inverse). 
 | `laplacian-box` | 751 ms | 2.66 / 3.02 ms | 7.66 / 8.05 ms | 355 ms | 85.2 ms |
 | `laplacian-gauss` | 824 ms | 2.61 / 3.12 ms | 7.18 / 7.61 ms | 316 ms | 75.8 ms |
 | `naive` | 351 ms | 1.79 / 1.88 ms | 5.23 / 5.47 ms | 242 ms | 58.4 ms |
+| `naive --no-med --no-ycocg`³ | 274 ms | 1.09 / 1.29 ms | 3.14 / 3.65 ms | 169 ms | 44.2 ms |
 | `haar`, zstd 19 | 8855 ms | 2.21 / 2.61 ms | 5.73 / 6.07 ms | 262 ms | 63.5 ms |
 | `haar`, range coder | 1092 ms | 16.2 / 21.2 ms | 37.5 / 42.8 ms | 1248 ms | 351 ms |
 | JPEG2000, 256² tiles | 2883 ms | 28.2 / 33.3 ms | 71.2 / 81.7 ms | 2659 ms | 796 ms |
+
+Without MED and YCoCg-R, RGB `naive` crops decode about 1.7× faster (1.09 against 1.86 ms in the same run), and the file nearly doubles (+87.5%), ending up larger than raw L0.
 
 zstd 19 saves 4.1% on `haar` for a 27× slower encode. Full-level decode is the same speed; its 256² crops were 17% slower in this run (2.21 vs 1.89 ms), which the gray runs did not show. The range coder is 8.6× slower per 256² crop.
 

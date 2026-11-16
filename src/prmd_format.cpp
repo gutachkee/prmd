@@ -66,6 +66,10 @@ void validate_header(const PrmdHeader& h) {
   if (h.quant != 0 && h.transform == Transform::Independent) {
     throw FormatError("lossy naive file is invalid");
   }
+  // One encoding per file: gray has no color transform to turn off.
+  if (!h.ycocg && channels(h.color) != 3) {
+    throw FormatError("no-YCoCg-R flag on a non-RGB file");
+  }
   if (h.data_offset != kHeaderSize + index_bytes(h)) {
     throw FormatError("bad data offset");
   }
@@ -213,6 +217,7 @@ std::vector<uint8_t> serialize(PrmdHeader& h,
   put32(b, 24, h.total_blocks);
   b[28] = uint8_t(h.entropy);
   b[29] = h.entropy_level;
+  b[30] = uint8_t((h.med ? 0 : kFlagNoMed) | (h.ycocg ? 0 : kFlagNoYcocg));
   put64(b, 32, h.data_offset);
   return b;
 }
@@ -256,13 +261,16 @@ PrmdHeader parse_header(const uint8_t* p, size_t n) {
   }
   h.entropy = Entropy(p[28]);
   h.entropy_level = p[29];
+  if (p[30] & ~(kFlagNoMed | kFlagNoYcocg)) {
+    throw FormatError("unknown header flags");
+  }
+  h.med = !(p[30] & kFlagNoMed);
+  h.ycocg = !(p[30] & kFlagNoYcocg);
   h.data_offset = get64(p + 32);
 
   // Reserved bytes must be zero, so a future version can give them meaning.
-  for (size_t i : {size_t(30), size_t(31)}) {
-    if (p[i] != 0) {
-      throw FormatError("reserved header bytes are not zero");
-    }
+  if (p[31] != 0) {
+    throw FormatError("reserved header bytes are not zero");
   }
   for (size_t i = 40; i < kHeaderSize; ++i) {
     if (p[i] != 0) {
