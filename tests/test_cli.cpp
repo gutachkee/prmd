@@ -1,0 +1,184 @@
+// The `prmd` command-line tool, run as a child process: exit codes (0 ok,
+// 1 usage, 2 I/O, 3 format, 4 out of range), strict number parsing, --clamp
+// and the PNG it writes.
+
+#include <gtest/gtest.h>
+
+#include <sys/wait.h>
+
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+#include "prmd/image_io.h"
+#include "reference.h"
+#include "test_util.h"
+
+using namespace prmd;
+
+namespace {
+
+// Runs `prmd args...` with stdout and stderr sent to a log file. Returns the
+// exit code, or -1 if the process did not exit normally.
+int run_cli(const std::vector<std::string>& args) {
+  // In sanitizer builds a report must not pass for the usage exit code 1.
+  std::string cmd =
+      "ASAN_OPTIONS=exitcode=86 UBSAN_OPTIONS=exitcode=86 '" PRMD_CLI_PATH "'";
+  for (const std::string& a : args) {
+    cmd += " '" + a + "'";  // test arguments contain no single quotes
+  }
+  cmd += " > '" + testutil::temp_path("cli.log").string() + "' 2>&1";
+  const int status = std::system(cmd.c_str());
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// A 300×200 gray PNG and its lossless 3-level .prmd encode, made once.
+struct CliFiles {
+  Image src;
+  std::string png;
+  std::string prmd;
+};
+
+const CliFiles& files() {
+  static const CliFiles f = [] {
+    CliFiles c;
+    c.src = ref::synthetic_image(300, 200, ColorFormat::Gray8, 7);
+    c.png = testutil::temp_path("cli_src.png").string();
+    c.prmd = testutil::temp_path("cli.prmd").string();
+    save_png(c.png, c.src);
+    EXPECT_EQ(run_cli({"encode", c.png, c.prmd, "--levels", "3"}), 0);
+    return c;
+  }();
+  return f;
+}
+
+// `decode` arguments for the crop {x, y, w, h} of `level`, written to `out`.
+std::vector<std::string> decode_args(const std::string& file,
+                                     const std::string& level,
+                                     const std::string& x,
+                                     const std::string& y,
+                                     const std::string& w,
+                                     const std::string& h,
+                                     const std::string& out) {
+  return {"decode", file, "--level", level, "--x", x, "--y", y,
+          "--w",    w,    "--h",     h,     "-o", out};
+}
+
+}  // namespace
+
+TEST(Cli, ExitCodeZeroForEncodeDecodeInfoAndHelp) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_crop.png").string();
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "0", "10", "20", "64", "32", out)), 0);
+  EXPECT_EQ(run_cli({"info", f.prmd}), 0);
+  EXPECT_EQ(run_cli({"--help"}), 0);
+  EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("c.j2k").string(),
+                     "--codec", "j2k", "--levels", "3"}),
+            0);
+}
+
+TEST(Cli, DecodeWritesTheExactCropAsPng) {
+  const CliFiles& f = files();
+  const auto ref = ref::pyramid(f.src, 3, Transform::Haar, Downsampler::Box);
+  const std::string out = testutil::temp_path("cli_exact.png").string();
+
+  ASSERT_EQ(run_cli(decode_args(f.prmd, "0", "100", "50", "130", "70", out)),
+            0);
+  const Image l0 = load_image(out);
+  EXPECT_EQ(l0.format, ColorFormat::Gray8);
+  EXPECT_EQ(l0.pixels, f.src.crop({100, 50, 130, 70}).pixels);
+
+  ASSERT_EQ(run_cli(decode_args(f.prmd, "2", "5", "7", "60", "40", out)), 0);
+  EXPECT_EQ(load_image(out).pixels, ref[2].crop({5, 7, 60, 40}).pixels);
+}
+
+TEST(Cli, ClampDecodesTheIntersection) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_clamp.png").string();
+  // Level 1 is 150×100: the request sticks out on the right and bottom.
+  auto args = decode_args(f.prmd, "1", "120", "80", "64", "64", out);
+  EXPECT_EQ(run_cli(args), 4);  // strict by default
+
+  args.push_back("--clamp");
+  ASSERT_EQ(run_cli(args), 0);
+  const Image img = load_image(out);
+  EXPECT_EQ(img.width, 30);
+  EXPECT_EQ(img.height, 20);
+  const auto ref = ref::pyramid(f.src, 3, Transform::Haar, Downsampler::Box);
+  EXPECT_EQ(img.pixels, ref[1].crop({120, 80, 30, 20}).pixels);
+}
+
+TEST(Cli, UsageErrorsExitWithOne) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_usage.png").string();
+  EXPECT_EQ(run_cli({}), 1);                     // no command
+  EXPECT_EQ(run_cli({"frobnicate"}), 1);         // unknown command
+  EXPECT_EQ(run_cli({"encode", f.png}), 1);      // missing <out>
+  EXPECT_EQ(run_cli({"info", f.prmd, "--bogus", "1"}), 1);  // unknown option
+  EXPECT_EQ(run_cli({"decode", f.prmd, "--level", "0", "--x", "0", "--y", "0",
+                     "--w", "8", "--h", "8"}),
+            1);  // missing -o
+  EXPECT_EQ(run_cli({"decode", f.prmd, "--level"}), 1);  // missing value
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--mode", "wavelet"}), 1);
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--levels", "0"}), 1);  // invalid
+}
+
+TEST(Cli, InvalidNumbersAreUsageErrors) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_num.png").string();
+  for (const char* bad : {"", "12abc", "abc", "1.5", " ", "4294967296",
+                          "-2147483649", "99999999999999999999"}) {
+    EXPECT_EQ(run_cli(decode_args(f.prmd, "0", bad, "0", "8", "8", out)), 1)
+        << "--x '" << bad << "'";
+  }
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--levels", "5x"}), 1);
+  EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("n.j2k").string(),
+                     "--codec", "j2k", "--j2k-lossy-psnr", "40dB"}),
+            1);
+  EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("n.j2k").string(),
+                     "--codec", "j2k", "--j2k-lossy-psnr", "1e999"}),
+            1);
+}
+
+TEST(Cli, OutOfRangeRequestsExitWithFour) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_oor.png").string();
+  // Huge coordinates: x + w overflows int; must be rejected, not wrap.
+  EXPECT_EQ(
+      run_cli(decode_args(f.prmd, "0", "2147483647", "0", "16", "16", out)), 4);
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "0", "0", "0", "2147483647",
+                                "2147483647", out)),
+            4);
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "0", "-1", "0", "16", "16", out)), 4);
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "3", "0", "0", "8", "8", out)), 4);
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "-1", "0", "0", "8", "8", out)), 4);
+  EXPECT_EQ(run_cli(decode_args(f.prmd, "0", "0", "0", "0", "8", out)), 4);
+  // --clamp with no overlap at all is still out of range.
+  auto args = decode_args(f.prmd, "0", "2147483647", "2147483647", "16", "16",
+                          out);
+  args.push_back("--clamp");
+  EXPECT_EQ(run_cli(args), 4);
+}
+
+TEST(Cli, IoAndFormatErrors) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_err.png").string();
+  const std::string missing = testutil::temp_path("missing.prmd").string();
+  EXPECT_EQ(run_cli({"info", missing}), 2);
+  EXPECT_EQ(run_cli({"encode", missing + ".png", out}), 2);
+  EXPECT_EQ(run_cli({"encode", f.png, "/nonexistent-dir/x.prmd"}), 2);
+
+  // A file with the .prmd magic but a broken header.
+  std::vector<char> bytes = testutil::read_file(f.prmd);
+  bytes[4] = 9;  // version
+  const std::string bad = testutil::temp_path("cli_bad.prmd").string();
+  testutil::write_file(bad, bytes);
+  EXPECT_EQ(run_cli({"info", bad}), 3);
+  EXPECT_EQ(run_cli(decode_args(bad, "0", "0", "0", "8", "8", out)), 3);
+
+  // Truncated data.
+  bytes = testutil::read_file(f.prmd);
+  bytes.pop_back();
+  testutil::write_file(bad, bytes);
+  EXPECT_EQ(run_cli(decode_args(bad, "0", "0", "0", "8", "8", out)), 3);
+}

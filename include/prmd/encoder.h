@@ -26,8 +26,8 @@ enum class Downsampler : uint8_t { Box = 0, Gauss = 1 };
 
 // How code-block numbers become bytes. Values are stable on-disk ids.
 enum class Entropy : uint8_t {
-  // Custom context-adaptive binary range coder: best ratio, ~10x slower
-  // decode.
+  // Custom context-adaptive binary range coder: best ratio, ~12x slower
+  // decode (~10x on a Raspberry Pi 5).
   Range = 0,
   // Zigzag int16 byte planes + zstd: default — fast decode, a few % larger.
   Zstd = 1,

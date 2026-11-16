@@ -45,15 +45,23 @@ uint64_t get64(const uint8_t* p) {
 
 // Field-range checks on a parsed header (ids are checked while parsing).
 void validate_header(const PrmdHeader& h) {
-  if (h.width == 0 || h.height == 0 || h.width > (1u << 30) ||
-      h.height > (1u << 30)) {
-    throw FormatError("bad image dimensions");
-  }
   if (h.levels < 1 || h.levels > kMaxLevels) {
     throw FormatError("bad level count");
   }
-  if (h.cblk < 2 || h.cblk % 2 || h.tile < h.cblk || h.tile % h.cblk) {
-    throw FormatError("bad tile/cblk");
+  if (const char* why =
+          geometry_error(h.width, h.height, h.levels, h.tile, h.cblk)) {
+    throw FormatError(std::string("bad geometry: ") + why);
+  }
+  // Checked before anything is sized from total_blocks, so a hostile
+  // header cannot request a huge index allocation.
+  const auto geom = make_geometry(int(h.width), int(h.height), h.levels, h.tile,
+                                  h.cblk, h.transform);
+  uint64_t total = 0;
+  for (const LevelGeom& g : geom) {
+    total += g.num_ids;
+  }
+  if (total != h.total_blocks) {
+    throw FormatError("block count inconsistent with header");
   }
   if (h.quant != 0 && h.transform == Transform::Independent) {
     throw FormatError("lossy naive file is invalid");
@@ -86,6 +94,46 @@ void check_level_table(const PrmdHeader& h,
 
 }  // namespace
 
+const char* geometry_error(uint64_t width,
+                           uint64_t height,
+                           int levels,
+                           int tile,
+                           int cblk) {
+  if (width == 0 || height == 0 || width > (1u << 30) || height > (1u << 30)) {
+    return "image dimensions must be 1..2^30";
+  }
+  if (levels < 1 || levels > kMaxLevels) {
+    return "level count must be 1..16";
+  }
+  if (cblk < 16 || cblk % 2 || cblk > 4096) {
+    return "cblk must be even, 16..4096";
+  }
+  if (tile < cblk || tile % cblk || tile > 32768) {
+    return "tile must be a multiple of cblk, <= 32768";
+  }
+  const uint64_t k = uint64_t(tile / cblk);
+  uint64_t total = 0;
+  uint64_t w = width;
+  uint64_t h = height;
+  for (int level = 0; level < levels; ++level) {
+    const uint64_t bx = (w + uint64_t(cblk) - 1) / uint64_t(cblk);
+    const uint64_t by = (h + uint64_t(cblk) - 1) / uint64_t(cblk);
+    if (bx > 0xFFFF || by > 0xFFFF) {
+      return "too many code-blocks per level row/column (max 65535)";
+    }
+    const uint64_t tx = (w + uint64_t(tile) - 1) / uint64_t(tile);
+    const uint64_t ty = (h + uint64_t(tile) - 1) / uint64_t(tile);
+    total += tx * ty * k * k;
+    w = (w + 1) / 2;
+    h = (h + 1) / 2;
+  }
+  // One extra offset entry follows the last block.
+  if (total >= 0xFFFFFFFFull) {
+    return "too many blocks for a 32-bit block index";
+  }
+  return nullptr;
+}
+
 std::vector<LevelGeom> make_geometry(int width,
                                      int height,
                                      int levels,
@@ -105,7 +153,8 @@ std::vector<LevelGeom> make_geometry(int width,
     g.blocks_y = (h + cblk - 1) / cblk;
     g.tiles_x = (w + tile - 1) / tile;
     g.tiles_y = (h + tile - 1) / tile;
-    g.num_ids = uint32_t(g.tiles_x * g.tiles_y * g.k * g.k);
+    g.num_ids = uint32_t(uint64_t(g.tiles_x) * uint64_t(g.tiles_y) *
+                         uint64_t(g.k) * uint64_t(g.k));
     g.base = (level == levels - 1) || t == Transform::Independent;
     w = (w + 1) / 2;
     h = (h + 1) / 2;
@@ -208,6 +257,18 @@ PrmdHeader parse_header(const uint8_t* p, size_t n) {
   h.entropy = Entropy(p[28]);
   h.entropy_level = p[29];
   h.data_offset = get64(p + 32);
+
+  // Reserved bytes must be zero, so a future version can give them meaning.
+  for (size_t i : {size_t(30), size_t(31)}) {
+    if (p[i] != 0) {
+      throw FormatError("reserved header bytes are not zero");
+    }
+  }
+  for (size_t i = 40; i < kHeaderSize; ++i) {
+    if (p[i] != 0) {
+      throw FormatError("reserved header bytes are not zero");
+    }
+  }
 
   validate_header(h);
   return h;

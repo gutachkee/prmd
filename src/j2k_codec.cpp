@@ -275,6 +275,11 @@ class J2kDecoder final : public CropDecoder {
       throw FormatError("J2K: no codestream info");
     }
     levels_ = int(info->m_default_tile_info.tccp_info[0].numresolutions);
+    // Foreign files may carry up to 33 resolutions; DecodeStats and the
+    // level shifts below assume at most kMaxLevels.
+    if (levels_ > kMaxLevels) {
+      levels_ = kMaxLevels;
+    }
     tile_w_ = int(info->tdx);
     tile_h_ = int(info->tdy);
     tile_x0_ = int(info->tx0);

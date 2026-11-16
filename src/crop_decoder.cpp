@@ -38,8 +38,9 @@ DecodeResult CropDecoder::decode(int level, const Rect& r) {
   check_level(level, r);
 
   const LevelInfo li = level_info(level);
-  if (r.empty() || r.x < 0 || r.y < 0 || r.right() > li.width ||
-      r.bottom() > li.height) {
+  // Compare without adding x + w, which could overflow int.
+  if (r.empty() || r.x < 0 || r.y < 0 || r.w > li.width - r.x ||
+      r.h > li.height - r.y) {
     throw std::out_of_range("out of bounds: " + describe(level, r) +
                             " (level is " + std::to_string(li.width) + "x" +
                             std::to_string(li.height) + ")");

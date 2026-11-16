@@ -15,6 +15,8 @@ option(PRMD_BUILD_TESTS "Build unit tests" ON)
 option(PRMD_PROFILE "Compile the PRMD_TIMED pipeline timers in (include/prmd/profile.h)" OFF)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+# 64-bit off_t on 32-bit targets (armv7): files may approach 4 GiB.
+add_compile_definitions(_FILE_OFFSET_BITS=64)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   add_compile_options(-O2)
   if(PRMD_NATIVE)
@@ -66,8 +68,15 @@ target_link_libraries(prmd PRIVATE prmd_core)
 add_executable(prmdbench bench/prmdbench.cpp)
 target_link_libraries(prmdbench PRIVATE prmd_core)
 # Default --out: reports and samples stay in this build directory.
+# Report header states the real build type and flags.
+get_directory_property(PRMD_COMPILE_OPTS COMPILE_OPTIONS)
+list(JOIN PRMD_COMPILE_OPTS " " PRMD_COMPILE_OPTS_STR)
+string(TOUPPER "${CMAKE_BUILD_TYPE}" PRMD_BT_UPPER)
+string(STRIP "${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${PRMD_BT_UPPER}} ${PRMD_COMPILE_OPTS_STR}" PRMD_BUILD_DESC)
+string(REGEX REPLACE " +" " " PRMD_BUILD_DESC "${PRMD_BUILD_DESC}")
 target_compile_definitions(prmdbench PRIVATE
-  PRMD_BENCH_OUT_DIR="${CMAKE_BINARY_DIR}/bench")
+  PRMD_BENCH_OUT_DIR="${CMAKE_BINARY_DIR}/bench"
+  PRMD_BUILD_DESC="${PRMD_BUILD_DESC}")
 
 add_executable(prmdpipeline tools/prmd_pipeline.cpp)
 target_link_libraries(prmdpipeline PRIVATE prmd_core)
@@ -83,10 +92,14 @@ if(PRMD_BUILD_TESTS)
     tests/test_codec.cpp
     tests/test_j2k.cpp
     tests/test_lossy.cpp
+    tests/test_cli.cpp
     tests/reference.cpp
   )
   add_executable(prmd_tests ${PRMD_TEST_SOURCES})
   target_link_libraries(prmd_tests PRIVATE prmd_core GTest::gtest GTest::gtest_main)
+  # test_cli.cpp runs the `prmd` executable as a child process.
+  add_dependencies(prmd_tests prmd)
+  target_compile_definitions(prmd_tests PRIVATE PRMD_CLI_PATH="$<TARGET_FILE:prmd>")
   include(GoogleTest)
   gtest_discover_tests(prmd_tests DISCOVERY_TIMEOUT 60)
 endif()

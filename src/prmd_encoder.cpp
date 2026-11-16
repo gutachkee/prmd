@@ -26,7 +26,7 @@ using Planes = std::vector<Region>;
 // The exact (lossless) pyramid before anything is stored.
 struct Decomposition {
   std::vector<Planes> levels;              // [level][channel]
-  std::vector<std::vector<Planes>> bands;  // [level][channel][band]
+  std::vector<std::vector<Planes>> bands;  // [level][channel][band]; haar, cdf53 only
 };
 
 // Blocks encoded back to back, plus their index.
@@ -78,11 +78,13 @@ void dequantize_planes(Planes& p, size_t first, int channels, int step) {
   }
 }
 
-// 1. Level planes and detail bands of the exact pyramid. `xf` is null for
-// Transform::Independent, whose levels are plain downsamples.
+// 1. Level planes and detail bands of the exact pyramid. `wavelet` is null
+// when the levels are plain downsamples and no bands are needed: for
+// Transform::Independent, and for Transform::Laplacian, whose residuals
+// store_laplacian_residuals takes against the reconstructed coarser level.
 Decomposition decompose(const Image& src,
                         int num_levels,
-                        const LevelTransform* xf,
+                        const LevelTransform* wavelet,
                         Downsampler down) {
   const int channels = src.channels();
   Decomposition out;
@@ -98,9 +100,9 @@ Decomposition decompose(const Image& src,
     for (int c = 0; c < channels; ++c) {
       const Region& fine = out.levels[size_t(level)][size_t(c)];
       Region coarse;
-      if (xf) {
+      if (wavelet) {
         PRMD_TIMED("forward");
-        xf->forward(fine, coarse, out.bands[size_t(level)][size_t(c)]);
+        wavelet->forward(fine, coarse, out.bands[size_t(level)][size_t(c)]);
       } else {
         PRMD_TIMED("downsample");
         coarse = downsample(fine, down);
@@ -415,6 +417,11 @@ EncodeReport encode_prmd(const Image& src_in,
   if (src_in.width <= 0 || src_in.height <= 0) {
     throw std::invalid_argument("empty source image");
   }
+  if (const char* why =
+          geometry_error(uint64_t(src_in.width), uint64_t(src_in.height),
+                         opts.levels, opts.tile, opts.cblk)) {
+    throw std::invalid_argument(std::string("image geometry: ") + why);
+  }
 
   Image src;
   {
@@ -435,10 +442,14 @@ EncodeReport encode_prmd(const Image& src_in,
     total_blocks += g.num_ids;
   }
 
+  // Laplacian levels are the same downsample its forward() would compute;
+  // its forward residuals would be discarded, so they are not computed.
+  const LevelTransform* wavelet =
+      opts.transform == Transform::Laplacian ? nullptr : xf.get();
   Decomposition pyr;
   {
     PRMD_TIMED("decompose");
-    pyr = decompose(src, opts.levels, xf.get(), opts.downsampler);
+    pyr = decompose(src, opts.levels, wavelet, opts.downsampler);
   }
   std::vector<Planes> stored;
   {

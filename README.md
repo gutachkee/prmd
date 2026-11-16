@@ -10,7 +10,9 @@ independently" layout are built in for comparison.
 - Modes and their options, with worked examples: [`docs/modes.md`](docs/modes.md)
 - Design and interfaces: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Results write-up: [`docs/WRITEUP.md`](docs/WRITEUP.md)
-- Benchmark: the key numbers are in the write-up; full tables are regenerated with `prmdbench` (below)
+- Benchmark tables (every mode, lossy, RGB): [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md); regenerate them with `prmdbench` (below)
+- Raspberry Pi 5 results: [`docs/Pi5_stats.md`](docs/Pi5_stats.md)
+- Per-step pipeline timings: [`docs/pipeline_durations.md`](docs/pipeline_durations.md)
 
 ## Build
 
@@ -25,7 +27,7 @@ sudo apt install build-essential cmake pkg-config \
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # -DPRMD_NATIVE=OFF to skip -mcpu=native
 cmake --build build -j
-ctest --test-dir build -j8 --output-on-failure    # 198 tests
+ctest --test-dir build -j8 --output-on-failure    # 222 tests
 ```
 
 This produces `build/prmd` (CLI), `build/prmdbench` (benchmark), `build/prmdpipeline`
@@ -43,8 +45,11 @@ build-profile/prmdpipeline test_image.jpg --runs 5                # per-step bre
 build/prmdpipeline test_image.jpg --runs 5                        # totals without timers
 ```
 
-`prmdpipeline` encodes once and decodes 10 crops (`--mode`, `--color`, `--quant`, `--entropy`,
-`--entropy-level`, `--cblk`, `--cache-mib` change the scenario). Results and method:
+`prmdpipeline` encodes once and decodes one 256² crop per level (overview, then zooming in) plus
+4 pans and jumps at L0: 10 crops with the default `--levels 6`. `--levels`, `--mode`, `--down`,
+`--color`, `--quant`, `--entropy`, `--entropy-level`, `--tile`, `--cblk` and `--cache-mib` change
+the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
+(default `pipeline.prmd` in the current directory) and `--label` names the run in the report. Results and method:
 [`docs/pipeline_durations.md`](docs/pipeline_durations.md).
 
 ## Use
@@ -76,8 +81,8 @@ build/prmd info img.prmd
 | `--down` | `box`, `gauss` (for `laplacian` / `naive`) | `box` |
 | `--levels` | 1–16 | 5 |
 | `--tile`, `--cblk` | tile (reporting unit) and code-block (decode unit) size | 256, 128 |
-| `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~10× slower decode), `raw` | `zstd` — see [DESIGN.md §7.1](docs/DESIGN.md) |
-| `--entropy-level` | zstd level 1–22. 19 encodes 15–30× slower; it makes gray lossless files no smaller, but RGB files ~4% and lossy files 3–12% smaller ([DESIGN.md §7.2](docs/DESIGN.md)) | 1 |
+| `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~12× slower decode; ~10× on a Pi 5), `raw` | `zstd` — see [DESIGN.md §7.1](docs/DESIGN.md) |
+| `--entropy-level` | zstd level 1–22. 19 encodes 4–34× slower (mode-dependent); it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller ([DESIGN.md §7.2](docs/DESIGN.md)) | 1 |
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
 | `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
 

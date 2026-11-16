@@ -160,10 +160,12 @@ class PrmdDecoder final : public CropDecoder {
     file_.read_at(0, head, kHeaderSize);
     h_ = parse_header(head, kHeaderSize);
 
-    std::vector<uint8_t> index(index_bytes(h_));
+    // data_offset == header + index size (validated by parse_header), so
+    // checking it against the file size first bounds the allocation below.
     if (h_.data_offset > file_bytes_) {
       throw FormatError("truncated index");
     }
+    std::vector<uint8_t> index(index_bytes(h_));
     file_.read_at(kHeaderSize, index.data(), index.size());
 
     std::vector<LevelEntry> table;

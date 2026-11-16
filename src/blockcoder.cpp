@@ -15,8 +15,9 @@ std::unique_ptr<BlockCoder> make_raw_coder();
 
 namespace {
 
-// Level 1: encodes 15-30x faster than 19 at the same size for gray lossless
-// files; 19 is ~4% smaller on RGB and 3-12% on lossy (DESIGN.md §7.2).
+// Level 1: encodes 4-34x faster than 19 (mode-dependent) at the same size for
+// gray lossless files; 19 is 2.7-4.1% smaller on RGB and 3-12% on lossy
+// (DESIGN.md §7.2).
 constexpr int kDefaultZstdLevel = 1;
 constexpr int kMaxZstdLevel = 22;
 

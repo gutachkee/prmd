@@ -134,7 +134,10 @@ Image load_png(FILE* f, const std::string& path) {
   }
   png_infop info = png_create_info_struct(png);
 
+  // Heap objects created before setjmp: a longjmp out of libpng must not
+  // skip the destructor of anything constructed after it.
   auto img = std::make_unique<Image>();
+  auto rows = std::make_unique<std::vector<png_bytep>>();
   if (!info || setjmp(png_jmpbuf(png))) {
     png_destroy_read_struct(&png, &info, nullptr);
     throw IoError("PNG decode failed for '" + path + "': " + perr.msg);
@@ -152,11 +155,11 @@ Image load_png(FILE* f, const std::string& path) {
   const int h = int(png_get_image_height(png, info));
   *img = Image(w, h, format_for_channels(out_channels));
 
-  std::vector<png_bytep> rows(static_cast<size_t>(h), nullptr);
+  rows->assign(static_cast<size_t>(h), nullptr);
   for (int y = 0; y < h; ++y) {
-    rows[size_t(y)] = img->row(y);
+    (*rows)[size_t(y)] = img->row(y);
   }
-  png_read_image(png, rows.data());
+  png_read_image(png, rows->data());
   png_read_end(png, nullptr);
   png_destroy_read_struct(&png, &info, nullptr);
   return std::move(*img);

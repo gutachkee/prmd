@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <fstream>
 #include <map>
 #include <random>
@@ -218,6 +220,22 @@ TEST(Codec, EncoderConvertsColorFormat) {
 
 // ----------------------------------------------------------------------------
 // Bounds
+
+TEST(Bounds, HugeCoordinatesDoNotOverflowTheCheck) {
+  const Fixture& fx =
+      fixture(testutil::prmd_configs()[0], 1000, 777, ColorFormat::Gray8);
+  auto dec = open_decoder(fx.path);
+  const int big = std::numeric_limits<int>::max();
+  // x + w overflows int; must still be rejected, not wrap to a small value.
+  EXPECT_THROW(dec->decode(0, {big - 5, 0, 100, 1}), std::out_of_range);
+  EXPECT_THROW(dec->decode(0, {2147483000, 0, 1000, 10}), std::out_of_range);
+  EXPECT_THROW(dec->decode(0, {0, big - 5, 1, 100}), std::out_of_range);
+  EXPECT_THROW(dec->decode(0, {0, 0, big, 1}), std::out_of_range);
+  EXPECT_THROW(dec->decode_clamped(0, {big - 5, 0, 100, 1}),
+               std::out_of_range);
+  const auto res = dec->decode_clamped(0, {-10, -10, big, big});
+  EXPECT_EQ(res.rect, (Rect{0, 0, 1000, 777}));
+}
 
 TEST(Bounds, StrictRejectsAndClampedIntersects) {
   const Fixture& fx =
@@ -457,6 +475,159 @@ TEST(RandomAccess, NaiveNeedsNoAncestors) {
   EXPECT_EQ(res.stats.tiles_touched, 1);
 }
 
+// A cache budget far below the working set: blocks are evicted constantly
+// (including blocks still in use by the current crop), and every crop must
+// still be exact.
+TEST(RandomAccess, CacheEvictionKeepsCropsExact) {
+  for (const Config& cfg :
+       {testutil::prmd_configs()[0], testutil::prmd_configs()[1],
+        testutil::prmd_configs()[3]}) {
+    const Fixture& fx = fixture(cfg, 1024, 1024, ColorFormat::Gray8);
+    DecoderOptions o;
+    o.cache_bytes = 300 << 10;  // about 4 decoded 128² blocks
+    auto dec = open_decoder(fx.path, o);
+    std::mt19937 rng(23);
+    int hits = 0;
+    int decoded = 0;
+    for (int it = 0; it < 250; ++it) {
+      const int L = int(rng() % 5u);
+      const Rect r = testutil::random_rect(rng, 1024 >> L, 1024 >> L, 300);
+      const DecodeResult res = dec->decode(L, r);
+      ASSERT_EQ(res.image.pixels, fx.ref[size_t(L)].crop(r).pixels)
+          << cfg.name << " it " << it << " L" << L << " "
+          << testutil::to_string(r);
+      hits += res.stats.cache_hits;
+      decoded += res.stats.blocks_decoded;
+    }
+    EXPECT_GT(hits, 0) << cfg.name;
+    EXPECT_GT(decoded, 250) << cfg.name;
+
+    // The same crop twice, with enough other crops in between to evict
+    // everything: the second decode reads the blocks again.
+    const Rect r{0, 0, 256, 256};
+    const auto first = dec->decode(0, r);
+    for (int i = 0; i < 8; ++i) {
+      dec->decode(0, {400 + 50 * i, 600, 200, 200});
+    }
+    const auto again = dec->decode(0, r);
+    EXPECT_GT(again.stats.blocks_decoded, 0) << cfg.name;
+    EXPECT_EQ(again.image.pixels, first.image.pixels) << cfg.name;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Corrupt payloads: the index is valid, the block data is not
+
+namespace {
+
+// `bytes` with block `id`'s payload shortened by `cut` bytes; the index is
+// rewritten so the file still opens.
+std::vector<char> truncate_block(const std::vector<char>& bytes,
+                                 const IndexInfo& ii,
+                                 uint32_t id,
+                                 uint32_t cut) {
+  std::vector<uint32_t> off = ii.offsets;
+  std::vector<char> out = bytes;
+  const auto end = out.begin() + std::ptrdiff_t(ii.data_offset + off[id + 1]);
+  out.erase(end - std::ptrdiff_t(cut), end);
+  for (size_t j = id + 1; j < off.size(); ++j) {
+    off[j] -= cut;
+  }
+  // The offsets are the last part of the index, just before data_offset.
+  const size_t pos = size_t(ii.data_offset) - 4 * off.size();
+  for (size_t j = 0; j < off.size(); ++j) {
+    for (int b = 0; b < 4; ++b) {
+      out[pos + 4 * j + size_t(b)] = char(uint8_t(off[j] >> (8 * b)));
+    }
+  }
+  return out;
+}
+
+// Decodes every level in full. Returns the number of levels that threw
+// FormatError; any other exception fails the test.
+int decode_all_levels(const std::string& path, const char* what) {
+  auto dec = open_decoder(path);
+  int errors = 0;
+  for (int L = 0; L < dec->num_levels(); ++L) {
+    const LevelInfo li = dec->level_info(L);
+    try {
+      const DecodeResult res = dec->decode(L, {0, 0, li.width, li.height});
+      EXPECT_EQ(res.image.width, li.width) << what;
+      EXPECT_EQ(res.image.height, li.height) << what;
+    } catch (const FormatError&) {
+      ++errors;
+    }
+  }
+  return errors;
+}
+
+}  // namespace
+
+class CorruptPayloadTest : public ::testing::TestWithParam<Config> {};
+
+// Every payload overwritten with random bytes. The decoder must not crash or
+// read out of bounds (run under ASan/UBSan); zstd must reject every level.
+TEST_P(CorruptPayloadTest, GarbagePayloadsNeverCrash) {
+  const Config& cfg = GetParam();
+  for (ColorFormat f : {ColorFormat::Gray8, ColorFormat::RGB8}) {
+    const Fixture& fx = fixture(cfg, 512, 384, f);
+    const IndexInfo ii = read_index(fx.path);
+    for (unsigned seed : {1u, 2u, 3u}) {
+      std::vector<char> bytes = testutil::read_file(fx.path);
+      std::mt19937 garbage(seed);
+      for (uint32_t id = 0; id + 1 < ii.offsets.size(); ++id) {
+        corrupt_block(bytes, ii, id, garbage);
+      }
+      const auto p = testutil::temp_path("garbage.prmd").string();
+      testutil::write_file(p, bytes);
+      const int errors = decode_all_levels(p, cfg.name);
+      if (cfg.e == Entropy::Zstd) {
+        EXPECT_EQ(errors, 5) << cfg.name << " seed " << seed;
+      }
+    }
+  }
+}
+
+// Payloads cut short. zstd and raw must report FormatError for the level
+// that needs the block; range must not crash.
+TEST_P(CorruptPayloadTest, TruncatedPayloadsAreRejected) {
+  const Config& cfg = GetParam();
+  const Fixture& fx = fixture(cfg, 512, 384, ColorFormat::Gray8);
+  const IndexInfo ii = read_index(fx.path);
+  const std::vector<char> good = testutil::read_file(fx.path);
+  const auto geom = internal::make_geometry(512, 384, 5, 256, 128, cfg.t);
+
+  for (int L = 0; L < 5; ++L) {
+    const uint32_t id = geom[size_t(L)].first_block;  // block (0, 0)
+    const uint32_t size = ii.offsets[id + 1] - ii.offsets[id];
+    ASSERT_GT(size, 1u);
+    for (uint32_t cut : {1u, size / 2, size}) {
+      const auto p = testutil::temp_path("truncated.prmd").string();
+      testutil::write_file(p, truncate_block(good, ii, id, cut));
+      auto dec = open_decoder(p);  // the index itself stays consistent
+      const Rect r{0, 0, 16, 16};
+      if (cfg.e == Entropy::Range) {
+        try {
+          dec->decode(L, r);
+        } catch (const FormatError&) {
+        }
+      } else {
+        EXPECT_THROW(dec->decode(L, r), FormatError)
+            << cfg.name << " L" << L << " cut " << cut;
+      }
+      // The level that needs the block may also be a finer one.
+      decode_all_levels(p, cfg.name);
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         CorruptPayloadTest,
+                         ::testing::ValuesIn(testutil::prmd_configs()),
+                         [](const auto& info) {
+                           return std::string(info.param.name);
+                         });
+
 // ----------------------------------------------------------------------------
 // Format integrity
 
@@ -486,6 +657,36 @@ TEST(Format, RejectsCorruptHeadersAndIndex) {
   const size_t index_byte = internal::kHeaderSize + 3;
   EXPECT_THROW(try_open(with_byte(index_byte, char(good[index_byte] ^ 1))),
                FormatError);  // level table
+
+  // `good` with the little-endian u32 at `at` replaced by `value`.
+  auto with_u32 = [&](size_t at, uint32_t value) {
+    std::vector<char> bad = good;
+    for (int i = 0; i < 4; ++i) {
+      bad[at + size_t(i)] = char(uint8_t(value >> (8 * i)));
+    }
+    return bad;
+  };
+  EXPECT_THROW(try_open(with_byte(30, 1)), FormatError);  // reserved
+  EXPECT_THROW(try_open(with_byte(50, 1)), FormatError);  // reserved
+  // A huge block count must be rejected before the index is allocated.
+  EXPECT_THROW(try_open(with_u32(24, 0x3FFFFFF0u)), FormatError);
+  // Huge dimensions: geometry is checked in 64-bit (no int overflow).
+  EXPECT_THROW(try_open(with_u32(8, 1u << 30)), FormatError);
+  {
+    std::vector<char> bad = with_u32(8, 1u << 30);
+    bad[12] = 0;
+    bad[13] = 0;
+    bad[14] = 0;
+    bad[15] = 0x40;  // height = 2^30 too
+    EXPECT_THROW(try_open(bad), FormatError);
+  }
+  // cblk below the encoder's minimum of 16.
+  {
+    std::vector<char> bad = good;
+    bad[20] = 2;
+    bad[21] = 0;
+    EXPECT_THROW(try_open(bad), FormatError);
+  }
 
   std::vector<char> truncated(good.begin(), good.end() - 1);
   EXPECT_THROW(try_open(truncated), FormatError);  // truncated data
@@ -526,6 +727,17 @@ TEST(Format, EncoderValidatesOptions) {
   o = {};
   o.entropy_level = 23;  // zstd: 1..22
   expect_invalid(o);
+
+  // More than 65535 code-blocks in a row would not fit the level table, so
+  // the decoder could not open the file: reject it at encode time.
+  {
+    const Image wide(65536 * 16 + 16, 1);
+    EncodeOptions w;
+    w.cblk = 16;
+    w.tile = 256;
+    w.levels = 1;
+    EXPECT_THROW(encode_file(wide, p, Codec::Prmd, w), std::invalid_argument);
+  }
 }
 
 TEST(Format, DefaultEntropyCoderIsZstd) {

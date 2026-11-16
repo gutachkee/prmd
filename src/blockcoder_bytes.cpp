@@ -4,6 +4,7 @@
 // almost all zero, which zstd exploits).
 
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 
@@ -15,6 +16,31 @@
 
 namespace prmd::internal {
 namespace {
+
+// One zstd context per thread, reused across blocks: ZSTD_compress and
+// ZSTD_decompress would otherwise allocate and free a context per call.
+struct CCtxFree {
+  void operator()(ZSTD_CCtx* c) const { ZSTD_freeCCtx(c); }
+};
+struct DCtxFree {
+  void operator()(ZSTD_DCtx* c) const { ZSTD_freeDCtx(c); }
+};
+
+ZSTD_CCtx* thread_cctx() {
+  thread_local std::unique_ptr<ZSTD_CCtx, CCtxFree> ctx(ZSTD_createCCtx());
+  if (!ctx) {
+    throw std::bad_alloc();
+  }
+  return ctx.get();
+}
+
+ZSTD_DCtx* thread_dctx() {
+  thread_local std::unique_ptr<ZSTD_DCtx, DCtxFree> ctx(ZSTD_createDCtx());
+  if (!ctx) {
+    throw std::bad_alloc();
+  }
+  return ctx.get();
+}
 
 inline uint32_t zigzag_encode(int32_t v) {
   return (uint32_t(v) << 1) ^ uint32_t(v >> 31);
@@ -101,8 +127,9 @@ class ZstdBlockCoder final : public BlockCoder {
     PRMD_TIMED("zstd_compress");
     const size_t start = out.size();
     out.resize(start + ZSTD_compressBound(buf.size()));
-    const size_t r = ZSTD_compress(out.data() + start, out.size() - start,
-                                   buf.data(), buf.size(), level_);
+    const size_t r =
+        ZSTD_compressCCtx(thread_cctx(), out.data() + start,
+                          out.size() - start, buf.data(), buf.size(), level_);
     if (ZSTD_isError(r)) {
       throw std::runtime_error(std::string("zstd: ") + ZSTD_getErrorName(r));
     }
@@ -115,7 +142,8 @@ class ZstdBlockCoder final : public BlockCoder {
     std::vector<uint8_t> buf(packed_size(io));
     {
       PRMD_TIMED("zstd_decompress");
-      const size_t r = ZSTD_decompress(buf.data(), buf.size(), data, size);
+      const size_t r =
+          ZSTD_decompressDCtx(thread_dctx(), buf.data(), buf.size(), data, size);
       if (ZSTD_isError(r) || r != buf.size()) {
         throw FormatError("zstd block: corrupt payload");
       }

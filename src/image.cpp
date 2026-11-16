@@ -1,6 +1,7 @@
 #include "prmd/image.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -26,14 +27,15 @@ const ColorFormatInfo* find_format(uint8_t id) {
 }  // namespace
 
 Rect intersect(const Rect& a, const Rect& b) {
-  const int x0 = std::max(a.x, b.x);
-  const int y0 = std::max(a.y, b.y);
-  const int x1 = std::min(a.right(), b.right());
-  const int y1 = std::min(a.bottom(), b.bottom());
-  if (x1 <= x0 || y1 <= y0) {
+  // 64-bit ends so rects near INT_MAX cannot overflow.
+  const int64_t x0 = std::max<int64_t>(a.x, b.x);
+  const int64_t y0 = std::max<int64_t>(a.y, b.y);
+  const int64_t x1 = std::min(int64_t(a.x) + a.w, int64_t(b.x) + b.w);
+  const int64_t y1 = std::min(int64_t(a.y) + a.h, int64_t(b.y) + b.h);
+  if (a.empty() || b.empty() || x1 <= x0 || y1 <= y0) {
     return Rect{};
   }
-  return Rect{x0, y0, x1 - x0, y1 - y0};
+  return Rect{int(x0), int(y0), int(x1 - x0), int(y1 - y0)};
 }
 
 const ColorFormatInfo& info(ColorFormat f) {
@@ -56,8 +58,8 @@ Image::Image(int w, int h, ColorFormat f) : width(w), height(h), format(f) {
 }
 
 Image Image::crop(const Rect& r) const {
-  if (r.empty() || r.x < 0 || r.y < 0 || r.right() > width ||
-      r.bottom() > height) {
+  if (r.empty() || r.x < 0 || r.y < 0 || r.w > width - r.x ||
+      r.h > height - r.y) {
     throw std::out_of_range("Image::crop: rect outside image");
   }
 

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include <cstdio>
 #include <filesystem>
 #include <random>
@@ -66,6 +68,13 @@ TEST(Rect, Intersect) {
   EXPECT_EQ((Rect{3, 4, 5, 6}).bottom(), 10);
 }
 
+TEST(Rect, IntersectNearIntMaxDoesNotOverflow) {
+  const int big = std::numeric_limits<int>::max();
+  EXPECT_TRUE(intersect({big - 5, 0, 100, 1}, {0, 0, 1000, 1000}).empty());
+  EXPECT_EQ(intersect({big - 5, 0, 100, 1}, {big - 10, 0, 8, 1}),
+            (Rect{big - 5, 0, 3, 1}));
+}
+
 TEST(ColorFormat, Info) {
   EXPECT_EQ(channels(ColorFormat::Gray8), 1);
   EXPECT_EQ(channels(ColorFormat::RGB8), 3);
@@ -90,6 +99,9 @@ TEST(Image, LayoutAndCrop) {
   EXPECT_THROW(img.crop({5, 0, 3, 1}), std::out_of_range);
   EXPECT_THROW(img.crop({0, 0, 0, 1}), std::out_of_range);
   EXPECT_THROW(img.crop({-1, 0, 1, 1}), std::out_of_range);
+  const int big = std::numeric_limits<int>::max();
+  EXPECT_THROW(img.crop({big - 1, 0, 3, 1}), std::out_of_range);
+  EXPECT_THROW(img.crop({0, big - 1, 1, 3}), std::out_of_range);
 }
 
 TEST(Image, Convert) {

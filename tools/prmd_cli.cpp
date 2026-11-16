@@ -4,6 +4,8 @@
 // Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of
 // range.
 
+#include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,13 +91,28 @@ struct Args {
     if (!has(k)) {
       return def;
     }
+    const std::string& s = kv.at(k);
     char* end = nullptr;
-    const long v = std::strtol(kv.at(k).c_str(), &end, 10);
-    if (*end != 0) {
-      throw UsageError("--" + k + " expects an integer, got '" + kv.at(k) +
-                       "'");
+    errno = 0;
+    const long long v = std::strtoll(s.c_str(), &end, 10);
+    if (s.empty() || end == s.c_str() || *end != 0) {
+      throw UsageError("--" + k + " expects an integer, got '" + s + "'");
+    }
+    if (errno == ERANGE || v < INT_MIN || v > INT_MAX) {
+      throw UsageError("--" + k + " is out of the int range: '" + s + "'");
     }
     return int(v);
+  }
+
+  float real(const std::string& k) const {
+    const std::string& s = kv.at(k);
+    char* end = nullptr;
+    errno = 0;
+    const float v = std::strtof(s.c_str(), &end);
+    if (s.empty() || end == s.c_str() || *end != 0 || errno == ERANGE) {
+      throw UsageError("--" + k + " expects a number, got '" + s + "'");
+    }
+    return v;
   }
 
   int required(const std::string& k) const {
@@ -164,7 +181,7 @@ EncodeOptions parse_encode_options(const Args& a) {
 
   if (a.has("j2k-lossy-psnr")) {
     o.j2k_lossless = false;
-    o.j2k_psnr = std::stof(a.kv.at("j2k-lossy-psnr"));
+    o.j2k_psnr = a.real("j2k-lossy-psnr");
   }
   return o;
 }

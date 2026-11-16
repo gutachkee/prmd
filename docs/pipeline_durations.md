@@ -3,11 +3,11 @@
 Where does the time go when you encode an image once and then read about 10 crops from it? This document times each step of the encode and decode pipelines, for several modes and options. Every number can be reproduced with `prmdpipeline` and the timers built into the library (see [How it was measured](#how-it-was-measured)).
 
 **Short answer:**
-- **Encoding is about 98% of the total.** With the defaults, loading the JPEG takes 180 ms and encoding it 281 ms. Opening the file and decoding all 10 crops take 6.1 ms. The encode alone costs as much as about 470 crops.
+- **Encoding is about 98% of encode + decode** (60% of the total once the JPEG load is included). With the defaults, loading the JPEG takes 180 ms and encoding it 281 ms. Opening the file and decoding all 10 crops take 6.1 ms. The encode alone costs as much as about 470 crops.
 - **Encode:** with the default `haar` + zstd 1, half the encode is entropy coding (zstd compression 39%, byte packing 8%). The forward transform takes 19%, and converting the image to gray and to integer planes 19%.
 - **Decode:** about 54% of every crop is entropy decoding (zstd decompression 35%, zigzag unpacking 19%). The inverse transform takes 21%. Reading from the file is 3%.
 - **What changes it most:**
-  - Encode: `--entropy-level 19` makes it 15× slower, `--entropy range` 5×, `cdf53` 4×, and `laplacian` about 3×.
+  - Encode: `--entropy-level 19` makes it 15× slower, `--entropy range` 5×, `cdf53` 4×, and `laplacian` about 2.7×.
   - Decode: `--entropy range` makes it 12× slower, and `rgb` 3×. The LRU cache makes it 40% faster.
 
 ## Setup
@@ -29,7 +29,7 @@ Where does the time go when you encode an image once and then read about 10 crop
 
 | # | level | step |
 |---|---|---|
-| 1 | L5 | overview: the whole level fits, so the crop is clamped to 256 × 167 |
+| 1 | L5 | overview: L5 is only 167 px tall, so the crop is clamped to 256 × 167 |
 | 2–6 | L4 → L0 | zoom in on the same point, one level at a time |
 | 7–9 | L0 | pan by +128 px, +256 px, then +256 / +128 px |
 | 10 | L0 | jump to a distant area (−2000 / +1200 px) |
@@ -38,7 +38,7 @@ Where does the time go when you encode an image once and then read about 10 crop
 
 The timers are part of the code, and are compiled out unless you ask for them.
 
-- **`PRMD_TIMED("step")`** (`include/prmd/profile.h`, `src/profile.cpp`) times the rest of the enclosing block. Unless the macro `PRMD_PROFILE` is defined, it expands to nothing, so a normal build has no timer code; `nm` finds no profiler symbols in its `libprmd_core.a`. `cmake -DPRMD_PROFILE=ON` defines it for `prmd_core` and everything linked with it.
+- **`PRMD_TIMED("step")`** (`include/prmd/profile.h`, `src/profile.cpp`) times the rest of the enclosing block. Unless the macro `PRMD_PROFILE` is defined, it expands to nothing, so a normal build has no timer code; `nm` on its `libprmd_core.a` shows only the stub `prmd::profile::reset()` / `snapshot()` entry points. `cmake -DPRMD_PROFILE=ON` defines it for `prmd_core` and everything linked with it.
 - **With timers on,** each scope reads `std::chrono::steady_clock` on entry and exit and adds the difference to a node of a call tree. A scope opened inside another becomes its child, and repeated calls add up in one node with a call count. So a per-block step such as `zstd_compress` appears once, with its 3906 calls summed.
 - **Where the timers are:**
   - `src/image_io.cpp`: `load_image`.
@@ -134,27 +134,29 @@ Every row is the same scenario, with the defaults changed only in the first colu
 | decoder cache 64 MiB | 31.60 | 278 | 1.0 | **3.63** | **0.60** | (same file as defaults) | inverse 34%, zstd decompress 29% |
 | `--color rgb` | 65.31 | 840 | 3.0 | 18.53 | 3.1 | zstd compress 48%, forward 19% | zstd decompress 34%, inverse 19% |
 | `--mode cdf53` | **30.49** | 1178 | 4.2 | 7.68 | 1.3 | **forward 5/3: 81%**, zstd compress 10% | inverse 36%, zstd decompress 29% |
-| `--mode laplacian --down gauss` | 39.30 | 865 | 3.1 | 7.65 | 1.3 | forward (Gauss) 32%, reconstruct upsample 17%, predict upsample 16% | zstd decompress 37%, unpack 21% |
+| `--mode laplacian --down gauss` | 39.30 | 763¹ | 2.7 | 7.65 | 1.3 | Gauss downsample 23%, reconstruct upsample 19%, predict upsample 19%¹ | zstd decompress 37%, unpack 21% |
 | `--mode naive` | 40.80 | 334 | 1.2 | 5.64 | 0.94 | zstd compress 40%, MED residual 17% | **MED reconstruct 47%**, zstd decompress 26% |
 | `--quant 4` (`haar`) | **19.83** | 437 | 1.6 | 6.36 | 1.1 | zstd compress 36%, quantize 29% | zstd decompress 33%, inverse 19% |
-| `--mode laplacian --down gauss --quant 4` | 25.92 | 1090 | 3.9 | 8.72 | 1.4 | forward (Gauss) 25%, zstd compress 19% | zstd decompress 38%, unpack 18% |
+| `--mode laplacian --down gauss --quant 4` | 25.92 | 986¹ | 3.5 | 8.72 | 1.4 | zstd compress 22%, Gauss downsample 18%¹ | zstd decompress 38%, unpack 18% |
 | `--entropy range` | 30.12 | 1458 | 5.2 | **70.25** | **11.7** | range coder 90% | range decoder 96% |
 | `--entropy-level 19` | 31.52 | **4184** | **14.9** | 6.14 | 1.0 | zstd compress 96% | zstd decompress 35%, inverse 21% |
 
 The `naive` row is a rerun in the fast state described under [How it was measured](#how-it-was-measured); the first run gave 6.85 ms.
+
+¹ Remeasured after the encoder stopped computing `laplacian` residuals twice (finding 4); before, encode took 865 ms lossless and 1090 ms at `--quant 4`. The crop columns are from the original run.
 
 ## Findings, by stage
 
 ### Encode
 
 1. **zstd compression is the largest step with the defaults** (109 ms, 39%). It grows with how much the coder has to search:
-   - Level 19 takes 4.1 s, for a gray file 0.3% smaller.
+   - Level 19 takes 4.1 s, for a gray file 0.3% smaller (on this full 47 MP image; on the 4096² benchmark crop it is no smaller).
    - `--quant 4` makes compression slower too (163 ms vs. 109 ms), though the output is smaller.
    - Smaller blocks mean more calls: 165 ms at `--cblk 64` (15,492 blocks), 85 ms at `--cblk 256` (1010 blocks).
 2. **Loading the JPEG (180 ms)** costs more than any single encode step and is the same for every mode. Converting to gray and to int32 planes adds another 53 ms, 19% of the default encode.
 3. **The `cdf53` forward transform takes 952 ms, 18× the Haar forward (54 ms)**, although both do similar arithmetic. Each vertical pass (`Cdf53Transform::forward` in `src/transform.cpp`) copies one column at a time from a row-major buffer about 17 KiB wide at L0. Every sample read then touches a new cache line, which is the likely cause. A row-wise vertical lifting pass, like the one Haar uses, should bring `cdf53` encode close to `haar`.
 4. **`laplacian` pays twice before entropy coding.**
-   - The forward pass (the Gauss downsample) takes 279 ms.
+   - The Gauss downsample takes 174 ms. It took 279 ms when `decompose` called `LaplacianTransform::forward`, which also computed open-loop residuals that the closed loop then discarded and recomputed; the encoder now only downsamples there (files are byte-identical).
    - The closed loop (`laplacian_residuals`) takes 340 ms lossless and 517 ms at `--quant 4`. It upsamples a full plane twice per level, once to predict (142 ms) and once to reconstruct (146 ms).
 5. **Quantizing is slow, and runs even when lossless.**
    - Lossy `haar` spends 131 ms in `quantize`, and lossy `laplacian` 156 ms. `quantize()` divides once per sample by a step only known at run time. Precomputing a reciprocal or a shift would remove most of that.

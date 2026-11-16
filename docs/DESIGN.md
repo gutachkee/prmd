@@ -109,7 +109,7 @@ void  save_png(const std::string& path, const Image& img);   // Gray8 or RGB8 PN
 ```cpp
 namespace prmd {
 
-constexpr int kMaxLevels = 16;
+// kMaxLevels (= 16) comes from encoder.h (§1.4), which this header includes.
 
 struct LevelInfo { int width = 0, height = 0; };
 
@@ -151,7 +151,8 @@ class CropDecoder {
   // in one place for every codec, then call decode_region().
 
   // Strict: requires 0 <= level < num_levels(), r.w > 0, r.h > 0, r.x >= 0, r.y >= 0,
-  // r.right() <= width(level), r.bottom() <= height(level). Otherwise throws std::out_of_range.
+  // r.x + r.w <= width(level), r.y + r.h <= height(level), checked without int overflow
+  // (huge coordinates are rejected, never wrapped). Otherwise throws std::out_of_range.
   // Usage: dec.decode(2, {x, y, w, h});
   DecodeResult decode(int level, const Rect& r);
 
@@ -165,6 +166,8 @@ class CropDecoder {
   // Must fill `stats`.
   virtual Image decode_region(int level, const Rect& r, DecodeStats& stats) = 0;
 };
+// Not thread-safe (§0): decode() updates the block cache without locking. Use one
+// decoder per thread.
 
 // Picks the codec by file magic: "PRMD" means .prmd, FF 4F FF 51 (SOC+SIZ) means J2K codestream.
 // Throws prmd::FormatError for unknown or corrupt files and prmd::IoError if the file can't be opened.
@@ -177,12 +180,14 @@ std::unique_ptr<CropDecoder> open_decoder(const std::string& path,
 ```cpp
 namespace prmd {
 
+constexpr int kMaxLevels = 16;
+
 enum class Codec       : uint8_t { Prmd, J2K };
 enum class Transform   : uint8_t { Haar = 0, Cdf53 = 1, Laplacian = 2, Independent = 3 };  // Independent = naive
 enum class Downsampler : uint8_t { Box = 0, Gauss = 1 };   // used only by Laplacian and Independent
 // How code-block numbers become bytes (§7). Values are stable on-disk ids.
 enum class Entropy     : uint8_t {
-  Range = 0,   // custom context-adaptive binary range coder: best ratio, ~10× slower decode
+  Range = 0,   // custom context-adaptive binary range coder: best ratio, ~12× slower decode (~10× on a Pi 5)
   Zstd  = 1,   // zigzag int16 byte planes + zstd: DEFAULT (§7.1) — fast decode, a few % larger
   Raw   = 2,   // zigzag int16, uncompressed: no entropy coding, for measurement only
 };
@@ -397,7 +402,12 @@ int      tile_index(const LevelGeom& g, int bx, int by);
 Rect     block_pixel_rect(const LevelGeom& g, int cblk, int bx, int by);
 // Explicit little-endian (de)serialization. No packed-struct memcpy.
 std::vector<uint8_t> serialize(PrmdHeader& h, const std::vector<LevelEntry>&, const std::vector<uint32_t>& offsets);
-PrmdHeader parse_header(const uint8_t* buf, size_t n);   // magic, version, ids, dims, data_offset
+// nullptr if the geometry is valid, else a reason. 64-bit arithmetic; shared by encoder and
+// decoder: dims ≤ 2^30, cblk even 16..4096, tile = k·cblk ≤ 32768, blocks per row/column
+// ≤ 65535 (u16 level table), total block ids < 2^32 − 1.
+const char* geometry_error(uint64_t width, uint64_t height, int levels, int tile, int cblk);
+PrmdHeader parse_header(const uint8_t* buf, size_t n);   // magic, version, ids, reserved = 0,
+                                                         // geometry_error, total_blocks, data_offset
 size_t     index_bytes(const PrmdHeader& h);             // level table + offsets size
 void parse_index(const PrmdHeader& h, const uint8_t* buf, size_t n, std::vector<LevelEntry>&,
                  std::vector<uint32_t>& offsets);        // monotonic offsets, table == geometry
@@ -462,7 +472,7 @@ offset 0  ┌──────────────────────�
 | 32 | u64 | data_offset | |
 | 40 | u8[24] | reserved | 0 |
 
-There is no checksum. On open the decoder validates the header fields, the level table (must equal the geometry derived from the header), the offsets (start at 0, monotonic) and the file size (must equal `data_offset` + last offset). This stops a damaged file from crashing the decoder or reading outside the file. Detecting bit-level corruption is left to the storage layer: a checksum on the index alone would protect 5 KB of an 11 MB file, and a damaged payload can still decode to wrong pixels without an error.
+There is no checksum. On open the decoder validates the header fields (reserved bytes must be 0; geometry via `geometry_error`, in 64-bit; `total_blocks` must equal the count derived from the geometry, checked before the index is allocated; `data_offset` must not exceed the file size before the index is read), the level table (must equal the geometry derived from the header), the offsets (start at 0, monotonic) and the file size (must equal `data_offset` + last offset). This stops a damaged file from crashing the decoder or reading outside the file. Detecting bit-level corruption is left to the storage layer: a checksum on the index alone would protect 5 KB of an 11 MB file, and a damaged payload can still decode to wrong pixels without an error.
 
 ### 3.2 Level entry (16 bytes)
 `u32 width, u32 height, u16 blocks_x, u16 blocks_y, u32 first_block` plus an implicit kind: `Base` for level N−1 (and for every level when `transform = independent`), otherwise `Detail`.
@@ -504,7 +514,7 @@ Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of range.
 
 ### 4.2 `prmdbench`
 ```
-prmdbench <image> [--levels 5] [--iters 1000] [--seed 1] [--size 4096] [--color gray|rgb|both]
+prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096] [--color gray|rgb|both]
          [--codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,j2k-t1024]
          [--out <build dir>/bench/results.md] [--workdir DIR] [--no-entropy-table] [--lossy]
 ```
@@ -512,7 +522,19 @@ Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 1); `+
 (the previous default) variants exist for the entropy table, which compares every coder on haar, cdf53 **and naive**, so the
 "vs naive" comparison is always made with the same coder on both sides.
 
-The input is converted to the requested color format(s) and center-cropped or edge-padded to `size²`. All codecs are encoded into a temp directory and then measured (§10).
+The input is converted to the requested color format(s) and center-cropped or edge-padded to `size²`. All codecs are encoded into a temp directory and then measured (§10). Tables that need a level or crop size the run doesn't have (small `--size`, few `--levels`) print `-` instead of aborting.
+
+### 4.3 `prmdpipeline`
+```
+prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
+             [--color gray|rgb] [--quant Q] [--entropy zstd|range|raw] [--entropy-level N]
+             [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] [--file pipeline.prmd] [--label text]
+```
+Loads the image, encodes it once, then decodes a fixed navigation plan: one 256² crop per level
+from the coarsest down, then 4 pans/jumps at L0 (10 crops at `--levels 6`). Prints median wall
+times over `--runs`. Per-step timers (`PRMD_TIMED`, `include/prmd/profile.h`) are compiled in
+only with the CMake option `-DPRMD_PROFILE=ON` (default OFF); without it the macro expands to
+nothing. Results and method: [pipeline_durations.md](pipeline_durations.md).
 
 ---
 
@@ -594,7 +616,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 | `Entropy` | What it does | Expected trade-off |
 |---|---|---|
 | `range` | the context-adaptive binary range coder described below | best ratio; decode is bit-serial (~10 instr/bit) |
-| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 1, §7.2) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4–5% (gray), +12% (RGB)** vs `range` |
+| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 1, §7.2) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4–5% (gray), +17% (RGB) at level 1 (+12% at level 19)** vs `range` |
 | `raw` | zigzag int16, little-endian, no compression | the lower bound on decode cost and the upper bound on size; isolates how much time the entropy stage takes |
 
 - The expected trade-offs are estimates. The benchmark measures them.
@@ -610,7 +632,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 
 **Evidence** (`prmdbench` gray run: 4096², 5 levels, 300 crops per cell; RGB run: 100 crops per cell; commands in the README):
 
-| | zstd 19 (default) | range | zstd vs range |
+| | zstd 19 (default at the time) | range | zstd vs range |
 |---|---:|---:|---:|
 | haar, file size (gray) | 11.59 MiB | 11.13 MiB | +4.1% |
 | cdf53, file size (gray) | 11.19 MiB | 10.69 MiB | +4.7% |
@@ -624,7 +646,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 
 ¹ From the previous run, when range was the default. The current full-decode table covers only the default coder.
 
-**The headline claim still holds under zstd.** The comparison against naive is now made with the *same* coder on both sides, since the benchmark measures naive under every coder: haar is −22.9% vs naive and cdf53 is −25.6% vs naive, both with zstd. With range they are −22.3% and −25.3%. The size advantage comes from the pyramid representation, not from the entropy coder.
+**The headline claim still holds under zstd.** The comparison against naive is now made with the *same* coder on both sides, since the benchmark measures naive under every coder: haar is −22.9% vs naive and cdf53 is −25.6% vs naive, both with zstd 19 (at the current default, zstd 1: −23.0% and −25.7%). With range they are −22.3% and −25.3%. The size advantage comes from the pyramid representation, not from the entropy coder.
 
 **Why.**
 1. The use case is latency-bound. Visual navigation fetches many small crops on an embedded CPU, and a 12× cut in crop latency (7 ms → 0.55 ms) matters more than 4% of storage. Size remains far below naive.
@@ -656,7 +678,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 | laplacian-gauss | 297 ms · 14.29 MiB | 314 ms · 14.29 MiB | 485 ms · 14.40 MiB | 1696 ms · 14.29 MiB |
 | naive | 106 ms · 15.04 MiB | 124 ms · 15.03 MiB | 283 ms · 15.11 MiB | 1636 ms · 15.04 MiB |
 
-**Evidence: RGB, lossless.** Only level 19 saves anything, about 4%:
+**Evidence: RGB, lossless.** Only level 19 saves anything, about 4% (2.7–4.1% across modes in the later benchmark run):
 
 | mode | zstd 1 | zstd 3 | zstd 9 | zstd 12 | zstd 19 |
 |---|---:|---:|---:|---:|---:|
@@ -673,7 +695,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 
 **Evidence: crop decode.** No change. In the `prmdbench` entropy table, a 256² crop at L0 takes 0.60 ms for haar at both levels, 0.80 ms for cdf53 at both, and 0.59 vs 0.58 ms for naive. (One earlier, shorter comparison showed naive 10–20% slower at level 1; the full run did not reproduce it.)
 
-**Why.** For gray lossless the speed-up is free. For RGB and lossy files, the default trades 3–12% of size for 15–30× faster encoding, and anyone who wants the smaller file can still ask for it. Why level 19 helps RGB and lossy blocks but not gray lossless ones wasn't investigated; plausibly, quantized and chroma planes contain more long repeated runs that only level 19's search finds.
+**Why.** For gray lossless the speed-up is free. For RGB and lossy files, the default trades 3–12% of size for 4–34× faster encoding (mode-dependent: about 4× for cdf53, 15× for haar, 31× for RGB haar), and anyone who wants the smaller file can still ask for it. Why level 19 helps RGB and lossy blocks but not gray lossless ones wasn't investigated; plausibly, quantized and chroma planes contain more long repeated runs that only level 19's search finds.
 
 **Costs accepted.**
 - RGB files about 4% larger (haar 23.91 vs 22.92 MiB). The range coder remains the smallest RGB option (20.52 MiB, 1.2 s encode), at 7–12× slower decode.
@@ -707,22 +729,34 @@ The rest of this section describes the **`range`** coder.
 - **Findings from probing (R2):**
   - With TLM and 256² tiles, an L0 crop reads only its tiles: a 100² crop read 59 KB of an 880 KB test file.
   - **At coarse levels J2K reads whole full-resolution tiles.** A tile's codestream holds all resolutions, so a level-3 crop of a 1024² image read the entire file. Splitting tiles into per-resolution tile-parts (`tp_flag='R'`, RPCL) made it *worse*, because OpenJPEG still reads every tile-part and seeks more. The default (LRCP, one tile-part per tile) is kept.
+  - **Resolution-progressive layouts don't help with OpenJPEG 2.5.4 (measured 2026-11-16).** The codestream syntax would allow coarse-level access: with tile-parts split by resolution (plus TLM), or a single tile with precincts and PLT packet lengths, a decoder could read only the first tile-parts or packets. OpenJPEG reads all tile-parts of every tile it decodes and doesn't use PLT to skip packets. Mean bytes read per random 256² crop on the 4096² gray benchmark image (lossless 5/3, 5 resolutions, 64² code-blocks, TLM on; 20 crops per level; scratch program, not part of the benchmark):
+
+    | layout | file | L0 | L2 | L3 | L4 (whole level) |
+    |---|---:|---:|---:|---:|---:|
+    | 256² tiles, LRCP, 1 tile-part (benchmarked) | 10.84 MiB | 194 KiB | 1.15 MiB | 3.8 MiB | 10.8 MiB |
+    | 256² tiles, RPCL, tile-parts by resolution | 10.86 MiB | 1.28 MiB | 2.8 MiB | 6.4 MiB | 12.8 MiB |
+    | 1024² tiles, RPCL, tile-parts by resolution | 10.82 MiB | 1.26 MiB | 3.0 MiB | 6.5 MiB | 11.1 MiB |
+    | untiled, RPCL or RLCP, tile-parts by resolution | 10.82 MiB | 10.8 MiB | 10.8 MiB | 10.8 MiB | 10.8 MiB |
+    | untiled, 256² precincts, PLT (RPCL, PCRL, ± tile-parts by resolution) | 10.82 MiB | 10.8 MiB | 10.8 MiB | 10.8 MiB | 10.8 MiB |
+
+    Crop times followed the bytes (untiled: 14–19 ms at L0–L3). So the benchmarked layout is already OpenJPEG's best; better coarse-level granularity would need a decoder that seeks by TLM/PLT per resolution (Kakadu, or a JPIP-style packet fetcher), which was not tried.
 - **Levels** are J2K's own LL bands. Tests compare against a full decode at `reduce=L`. The benchmark reports PSNR against the 2×2-mean pyramid.
 
 ---
 
 ## 9. Testing (gtest, `tests/`)
 
+222 tests, all registered with ctest through `gtest_discover_tests`.
+
 | Test file | What it covers |
 |---|---|
-| Test file | What it covers |
-|---|---|
-| `test_image.cpp` | `Rect`/`intersect`, `ColorFormat` table, `Image::crop`, `convert` RGB↔Gray, PNG round-trip (gray/RGB), JPEG load (gray/RGB, written with libjpeg in the test), I/O errors (missing, garbage, truncated JPEG) |
+| `test_image.cpp` | `Rect`/`intersect` (including near `INT_MAX`), `ColorFormat` table, `Image::crop`, `convert` RGB↔Gray, PNG round-trip (gray/RGB), JPEG load (gray/RGB, written with libjpeg in the test), I/O errors (missing, garbage, truncated JPEG) |
 | `test_rangecoder.cpp` | round-trip of random, skewed and all-zero bit streams; `encode_direct` at every width; carry-propagation stress; skewed data compresses near entropy; truncated input sets `overrun()` without crashing |
 | `test_transform.cpp` | `build_pyramid` equals the independent `tests/reference.cpp` for every mode × gray/RGB × odd sizes (1×9, 2×3, 101×77, 257×130); forward/inverse identity for each transform incl. values outside 0–255; region inverse equals full inverse **and depends only on `*_needed` samples** (everything else overwritten with garbage) |
 | `test_blockcoder.cpp` | parameterised over every `Entropy`: round-trip of random, Laplacian-distributed and extreme values for every `Band` and 1/3 channels; truncated payload → `FormatError`; full int32 magnitudes for range; out-of-int16 → zstd/raw throw; YCoCg-R and MED round-trip |
-| `test_codec.cpp` | **crop matrix** for 7 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+zstd, cdf53+raw) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, level table, truncation) and option validation; haar and cdf53 smaller than naive |
-| `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+zstd × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
+| `test_codec.cpp` | **crop matrix** for 7 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+range, cdf53+raw) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, reserved bytes, huge block count, huge dimensions, too-small cblk, level table, truncation) and option validation (including geometry the level table can't hold); bounds with coordinates near `INT_MAX`; haar and cdf53 smaller than naive; **LRU eviction** (a 300 KiB budget, far below the working set, over 250 random crops at every level: all exact, and an evicted crop is decoded again); **corrupt payloads** with a valid index, for every config and so every coder: random bytes in every block (gray and RGB) never crash and zstd rejects every level, and blocks cut by 1 byte, half or all of their payload give `FormatError` for zstd and raw (range: no crash). These run clean under ASan + UBSan |
+| `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+range × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
+| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection |
 | `test_j2k.cpp` | gray/RGB × 256/1024 tiles: L0 lossless vs source; 150 random crops + edges/corners at every level vs J2K's own full-level decode; TLM single-tile crop reads < ¼ of the file; bounds |
 
 **Random-access proof** (`test_codec.cpp`, every .prmd config):
@@ -739,9 +773,9 @@ The rest of this section describes the **`range`** coder.
 - **Sizes:** each codec's file size against raw L0 (16 MiB gray / 48 MiB RGB) and the raw pyramid (≈21.3 / 64 MiB), plus per-level bytes. PNG-per-256-tile is included as a size-only reference.
 - **Latency:**
   - crop sizes 256² and 512², at every level whose dimensions are ≥ the crop
-  - `--iters` random positions per row (300 in the committed results), uniform and non-aligned, with a fixed seed
+  - `--iters` random positions per row (300 by default and in the published numbers), uniform and non-aligned, with a fixed seed
   - for each codec: mean, p50 and p95 per crop (`steady_clock`), plus mean `tiles_touched`, `blocks_decoded` and `bytes_read`
-  - cache off (cold), after 10 warm-up crops
+  - block cache off, after 10 warm-up crops (the file itself is in the OS page cache)
   - the file is in the page cache, so `bytes_read` is the I/O metric
 - **Trajectory:** a 1000-step random walk of 256² crops at L0 with the cache on, for the `.prmd` modes.
 - **Reference rows:** full-level decode of L0–L2 (what a crop costs without random access).
@@ -756,7 +790,7 @@ The rest of this section describes the **`range`** coder.
 | # | Item | Mitigation / plan |
 |---|---|---|
 | R1 | **Confirmed:** OpenJPEG decodes once per codec instance | a fresh codec per crop; the main header is served from RAM (parse cost included in latency) |
-| R2 | **Confirmed in part:** TLM skips other tiles at L0, but coarse levels read whole full-resolution tiles | reported as a finding (§8); the `j2k-t256` vs `t1024` rows show the effect |
+| R2 | **Confirmed in part:** TLM skips other tiles at L0, but coarse levels read whole full-resolution tiles | reported as a finding (§8); the `j2k-t256` vs `t1024` rows show the effect. Resolution-progressive layouts (tile-parts by resolution, precincts + PLT) were measured and don't help with OpenJPEG 2.5.4 (§8) |
 | R3 | ancestor decoding makes a single-block crop cost about N blocks in A/B/C | geometric shrink, ~1–2 blocks per level; LRU cache; quantified in the benchmark |
 | R4 | resetting contexts per block costs compression | `cblk` is a parameter; benchmark 64/128/256 |
 | L1 | RGB handles 8-bit 3-channel only; YCoCg-R is applied to coefficients, not as a pre-transform | next step: a context that shares statistics across channels; other formats (alpha, 16-bit) |
@@ -768,19 +802,28 @@ The rest of this section describes the **`range`** coder.
 ## 12. Source layout
 
 ```
-CMakeLists.txt                 Release: -O2 -mcpu=native. Deps: JPEG, PNG, GTest, zstd, libopenjp2 (pkg-config)
-include/prmd/                  image.h image_io.h crop_decoder.h encoder.h pyramid.h errors.h
+CMakeLists.txt                 Release: -O2 -mcpu=native; _FILE_OFFSET_BITS=64; option PRMD_PROFILE (OFF).
+                               Deps: JPEG, PNG, GTest, zstd, libopenjp2 (pkg-config)
+include/prmd/                  image.h image_io.h crop_decoder.h encoder.h pyramid.h errors.h profile.h
 include/prmd/internal/         region.h planes.h transform.h rangecoder.h (header-only) blockcoder.h
-                               prmd_format.h prmd_codec.h j2k_codec.h
+                               prmd_format.h prmd_codec.h j2k_codec.h file.h (pread wrapper)
+                               timing.h (PRMD_TIMED)
 src/                           image.cpp image_io.cpp pyramid.cpp transform.cpp (haar, cdf53, laplacian,
                                downsamplers) blockcoder.cpp (factory, YCoCg-R, MED) blockcoder_range.cpp
                                blockcoder_bytes.cpp (zstd, raw) prmd_format.cpp prmd_encoder.cpp
-                               prmd_decoder.cpp j2k_codec.cpp crop_decoder.cpp encoder.cpp
+                               prmd_decoder.cpp j2k_codec.cpp crop_decoder.cpp encoder.cpp profile.cpp
 tools/prmd_cli.cpp             → executable `prmd` (library target: `prmd_core`, to avoid a name clash)
-bench/prmdbench.cpp
+tools/prmd_pipeline.cpp        → executable `prmdpipeline` (§4.3)
+bench/prmdbench.cpp            → executable `prmdbench` (§4.2, §10)
 tests/                         reference.{h,cpp} test_util.h test_image.cpp test_rangecoder.cpp
-                               test_transform.cpp test_blockcoder.cpp test_codec.cpp test_j2k.cpp
+                               test_transform.cpp test_blockcoder.cpp test_codec.cpp test_lossy.cpp
+                               test_j2k.cpp test_cli.cpp
 build/bench/                   benchmark output, git-ignored: reports results*.md, level-3 samples in samples/
 docs/DESIGN.md                 this document
-docs/WRITEUP.md                1–2 page results write-up (after the benchmark)
+docs/WRITEUP.md                results write-up (1–2 pages)
+docs/BENCHMARKS.md             full benchmark tables: every mode, lossy, RGB
+docs/modes.md                  modes and options with worked examples
+docs/Pi5_stats.md              the benchmark on a Raspberry Pi 5
+docs/pipeline_durations.md     per-step encode/decode timings (prmdpipeline)
+docs/img/                      level samples used by modes.md
 ```

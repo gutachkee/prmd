@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -192,7 +193,7 @@ std::string fmt(const char* f, double v) {
 }
 
 std::string ms(double v) {
-  return fmt("%.2f ms", v);
+  return std::isnan(v) ? std::string("-") : fmt("%.2f ms", v);
 }
 
 std::string bytes_h(double b) {
@@ -351,6 +352,7 @@ Args parse(int argc, char** argv) {
 // ----------------------------------------------------------------------------
 // Measurements
 
+// NaN times mark a cell that does not apply (level missing or too small).
 struct LatencyRow {
   double mean_ms = 0;
   double p50 = 0;
@@ -367,7 +369,15 @@ LatencyRow measure(CropDecoder& dec,
                    int crop,
                    int iters,
                    unsigned seed) {
+  if (level >= dec.num_levels()) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return LatencyRow{nan, nan, nan, 0, 0, 0, 0};
+  }
   const LevelInfo li = dec.level_info(level);
+  if (crop > li.width || crop > li.height || iters < 1) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return LatencyRow{nan, nan, nan, 0, 0, 0, 0};
+  }
   std::mt19937 rng(seed * 7919u + unsigned(level) * 131u + unsigned(crop));
   auto rand_rect = [&] {
     const int x = int(rng() % unsigned(li.width - crop + 1));
@@ -560,7 +570,8 @@ void latency_tables(Run& run, std::ostringstream& md) {
       }
     }
     md << "### Random " << crop << "×" << crop << " crops (" << run.args.iters
-       << " per row, cold cache, non-aligned positions)\n\n"
+       << " per row, block cache off, file in page cache, non-aligned "
+          "positions)\n\n"
        << t.str() << "\n";
   }
 }
@@ -652,6 +663,10 @@ void full_decode_table(Run& run, std::ostringstream& md) {
     }
     std::vector<std::string> row{n};
     for (int level = 0; level < 3; ++level) {
+      if (level >= run.dec[n]->num_levels()) {
+        row.push_back("-");
+        continue;
+      }
       const LevelInfo li = run.dec[n]->level_info(level);
       const auto start = Clock::now();
       (void)run.dec[n]->decode(level, {0, 0, li.width, li.height});
@@ -756,7 +771,7 @@ void lossy_table(Run& run, std::ostringstream& md) {
     auto d = open_decoder(p);
     const Image l0 = d->decode(0, {0, 0, a.size, a.size}).image;
     std::string psnr_l2 = "n/a";
-    if (exact_l2) {
+    if (exact_l2 && d->num_levels() > 2) {
       const LevelInfo li = d->level_info(2);
       psnr_l2 = psnr_s(
           psnr(d->decode(2, {0, 0, li.width, li.height}).image, *exact_l2));
@@ -798,7 +813,8 @@ void lossy_table(Run& run, std::ostringstream& md) {
       std::fprintf(stderr, "[%s] lossy %s q%d...\n", run.cname.c_str(), m.name,
                    q);
       const auto r = encode_file(run.img, p, Codec::Prmd, o);
-      add_row(m.name, "quant " + std::to_string(q), p, r.file_bytes, &exact[2]);
+      add_row(m.name, "quant " + std::to_string(q), p, r.file_bytes,
+              exact.size() > 2 ? &exact[2] : nullptr);
     }
   }
 
@@ -871,7 +887,7 @@ int main(int argc, char** argv) {
      << "\n";
   md << "- CPU: " << cpu_model() << ", " << sysconf(_SC_NPROCESSORS_ONLN)
      << " cores (single-threaded decode)\n";
-  md << "- build: " << __VERSION__ << ", Release -O2 -mcpu=native\n";
+  md << "- build: " << __VERSION__ << ", " << PRMD_BUILD_DESC << "\n";
   md << "- seed " << a.seed << ", " << a.iters
      << " crops per latency row, file in page cache\n";
   md << "- tiles 256×256 for every codec (prmd code-blocks 128×128), J2K "

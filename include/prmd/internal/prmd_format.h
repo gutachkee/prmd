@@ -69,6 +69,17 @@ std::vector<LevelGeom> make_geometry(int width,
                                      int cblk,
                                      Transform t);
 
+// Limits shared by the encoder and the decoder: dimensions <= 2^30,
+// cblk even in 16..4096, tile a multiple of cblk <= 32768, per-level block
+// counts that fit the uint16 level table, and a block-id total that fits
+// uint32. Computed in 64-bit so hostile headers cannot overflow. Returns
+// nullptr when the geometry is valid, else a short reason.
+const char* geometry_error(uint64_t width,
+                           uint64_t height,
+                           int levels,
+                           int tile,
+                           int cblk);
+
 // Index of the tile that holds block (bx, by), row-major within the level.
 inline int tile_index(const LevelGeom& g, int bx, int by) {
   return (by / g.k) * g.tiles_x + bx / g.k;

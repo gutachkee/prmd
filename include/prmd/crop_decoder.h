@@ -46,6 +46,8 @@ struct DecoderOptions {
   size_t cache_bytes = 0;  // LRU budget for decoded blocks; 0 = disabled
 };
 
+// Not thread-safe: decode() reads the file and updates the block cache
+// without locking. Use one decoder per thread, or serialize calls.
 class CropDecoder {
  public:
   virtual ~CropDecoder() = default;
@@ -60,7 +62,8 @@ class CropDecoder {
   virtual uint64_t open_bytes_read() const = 0;
 
   // Strict: requires 0 <= level < num_levels(), r.w > 0, r.h > 0, r.x >= 0,
-  // r.y >= 0, r.right() <= width(level), r.bottom() <= height(level).
+  // r.y >= 0, r.x + r.w <= width(level), r.y + r.h <= height(level)
+  // (checked without int overflow).
   // Otherwise throws std::out_of_range.
   DecodeResult decode(int level, const Rect& r);
 

@@ -1,10 +1,10 @@
 # Prmd on a Raspberry Pi 5
 
-The same `prmdbench` runs as in [WRITEUP.md §4](WRITEUP.md), repeated on a Raspberry Pi 5, with the MacBook Pro numbers from WRITEUP.md next to them. Commands, input and methodology are identical: the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at level 1, 300 random crops per row (100 for RGB), seed 1, one core, file in the page cache. Both runs were on 2026-11-16.
+The same `prmdbench` runs as in [BENCHMARKS.md](BENCHMARKS.md), repeated on a Raspberry Pi 5, with the MacBook Pro numbers of the same code next to them. Both runs predate the per-thread zstd context reuse in the decoder; [BENCHMARKS.md](BENCHMARKS.md) has the MacBook Pro's later crop timings, which are up to about 20% lower. Commands, input and methodology are identical: the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at level 1, 300 random crops per row (100 for RGB), seed 1, one core, file in the page cache. Both runs were on 2026-11-16.
 
 ## Setup
 
-| | Raspberry Pi 5 | MacBook Pro (WRITEUP.md) |
+| | Raspberry Pi 5 | MacBook Pro |
 |---|---|---|
 | CPU | 4× Cortex-A76 @ 2.4 GHz (`ondemand` governor) | Apple Silicon, 14 cores |
 | RAM | 4 GB | 17 GB |
@@ -49,7 +49,7 @@ Identical on both machines:
 
 ## Crop latency (gray, lossless)
 
-Mean / p95 per crop on the Pi. The *MacBook Pro* column is the `haar` mean from WRITEUP.md. Tiles and bytes per crop are the same as in WRITEUP.md.
+Mean / p95 per crop on the Pi. The *MacBook Pro* column is the `haar` mean from the MacBook Pro run of the same code. Tiles and bytes per crop are the same as in BENCHMARKS.md.
 
 | crop | level | haar | naive | J2K, 256² tiles | J2K ÷ haar | MacBook Pro haar |
 |---|---:|---:|---:|---:|---:|---:|
