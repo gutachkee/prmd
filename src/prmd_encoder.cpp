@@ -1,4 +1,4 @@
-// .prmd encoder (DESIGN.md §3–§5).
+// .prmd encoder (design.md §3–§5).
 
 #include "prmd/internal/prmd_codec.h"
 

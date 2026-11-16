@@ -1,5 +1,5 @@
 // prmdbench — size / latency / I/O / quality benchmark for every codec
-// (DESIGN.md §10).
+// (design.md §10).
 //
 // usage: prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096]
 //                  [--color gray|rgb|both] [--codecs a,b,...]

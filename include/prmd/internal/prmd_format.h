@@ -1,5 +1,5 @@
 #pragma once
-// .prmd on-disk structures (DESIGN.md §3). All integers little-endian, explicit
+// .prmd on-disk structures (design.md §3). All integers little-endian, explicit
 // (de)serialization.
 
 #include <cstddef>

@@ -1,4 +1,4 @@
-// .prmd decoder: recursive region reconstruction (DESIGN.md §6).
+// .prmd decoder: recursive region reconstruction (design.md §6).
 
 #include <algorithm>
 #include <list>

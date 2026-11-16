@@ -768,7 +768,7 @@ The rest of this section describes the **`range`** coder.
 
 ## 10. Benchmark methodology (`bench/prmdbench.cpp`)
 
-- **Input:** the user's JPEG (`test_image.jpg`, 8824×5336 RGB aerial photo), center-cropped to 4096², N = 5. Gray8 is the primary run (default `--out`, `build/bench/results.md`). An RGB8 run uses fewer codecs and iterations (`--out build/bench/results_rgb.md`). Both reports are regenerated output in the git-ignored build directory.
+- **Input:** the user's JPEG (`test_image.jpg`, 8824×5336 RGB aerial photo), center-cropped to 4096², N = 5. Gray8 is the primary run (default `--out`, `build/bench/results.md`). An RGB8 run uses 100 iterations, no entropy table and no `j2k-t1024`, but adds `haar+range`, `haar+zstd19` and the lossy table (`--out build/bench/results_rgb.md`). Both reports are regenerated output in the git-ignored build directory.
 - **Entropy coders:** for `haar`, `cdf53` and `naive`, one table comparing `zstd` 1 (default), `zstd` 19 (the previous default), `range` and `raw`: file size, size vs the default, size vs naive *under the same coder*, mean and p95 latency for 256² crops at L0 and 512² at L1. `raw` approximates the non-entropy share of decode time. All other tables use the default coder (zstd 1).
 - **Sizes:** each codec's file size against raw L0 (16 MiB gray / 48 MiB RGB) and the raw pyramid (≈21.3 / 64 MiB), plus per-level bytes. PNG-per-256-tile is included as a size-only reference.
 - **Latency:**
@@ -819,11 +819,11 @@ tests/                         reference.{h,cpp} test_util.h test_image.cpp test
                                test_transform.cpp test_blockcoder.cpp test_codec.cpp test_lossy.cpp
                                test_j2k.cpp test_cli.cpp
 build/bench/                   benchmark output, git-ignored: reports results*.md, level-3 samples in samples/
-docs/DESIGN.md                 this document
-docs/WRITEUP.md                results write-up (1–2 pages)
-docs/BENCHMARKS.md             full benchmark tables: every mode, lossy, RGB
+docs/design.md                 this document
+docs/writeup.md                results write-up (1–2 pages)
+docs/benchmarks.md             full benchmark tables: every mode, lossy, RGB
 docs/modes.md                  modes and options with worked examples
-docs/Pi5_stats.md              the benchmark on a Raspberry Pi 5
+docs/benchmarks-pi5.md         the benchmark on a Raspberry Pi 5
 docs/pipeline_durations.md     per-step encode/decode timings (prmdpipeline)
 docs/img/                      level samples used by modes.md
 ```

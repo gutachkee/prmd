@@ -267,7 +267,7 @@ TEST(Bounds, StrictRejectsAndClampedIntersects) {
 namespace {
 
 // Analytic set of block ids a crop needs, derived independently from the
-// decoder: walks the same dependency rule (DESIGN.md §5/§6) with plain
+// decoder: walks the same dependency rule (design.md §5/§6) with plain
 // interval arithmetic.
 std::set<uint32_t> expected_blocks(const Config& c,
                                    int W,

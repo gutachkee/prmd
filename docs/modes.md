@@ -18,7 +18,7 @@ A `.prmd` file always stores the coarsest level as pixels. The **mode** (`--mode
 - `laplacian` when lossy files must stay within a guaranteed per-pixel error, or when coarse levels should be Gaussian-smoothed.
 - `naive` only as the baseline.
 
-All numbers below come from the gray 4096² benchmark in [BENCHMARKS.md](BENCHMARKS.md) (5 levels, zstd at the default level 1, lossless unless noted).
+All numbers below come from the gray 4096² benchmark in [benchmarks.md](benchmarks.md) (5 levels, zstd at the default level 1, lossless unless noted).
 
 ## Options
 
@@ -180,6 +180,7 @@ Both store 8 numbers, where `haar` and `cdf53` store 4, and that's why the files
 - `gauss`, lossless: 14.29 MiB (−5.0% vs `naive`), 0.75 ms per 256² crop at L0.
 - `gauss`, Q = 4: 4.72 bits/px, 46.4 dB, **max error 2** (pixel values).
 - `box`, lossless: 14.43 MiB.
+- RGB, lossless: 32.38 MiB (`gauss`) and 31.96 MiB (`box`), 3.6–5.0% *larger* than `naive` (30.84 MiB); see [benchmarks.md](benchmarks.md#rgb). Use `haar` or `cdf53` for RGB unless you need the closed-loop lossy bound.
 
 ```sh
 build/prmd encode in.jpg out.prmd --mode laplacian --down gauss
@@ -222,10 +223,130 @@ Here is the same 64×64 patch of level 3 for each definition, zoomed 4×. `naive
 | `gauss` | 30.1 dB | 29.8 dB | 29.6 dB | 29.5 dB |
 | `cdf53` | 27.6 dB | 25.5 dB | 24.8 dB | 24.5 dB |
 
+## Modes and PSNR
+
+### What PSNR is
+
+PSNR compares two images: one picture against another, or a level against a reference level. Its unit is the decibel (dB).
+
+- A high PSNR means the two images are almost the same. A low PSNR means they are different.
+- If the two images are identical, the PSNR is infinite (∞).
+- Each 6 dB increase halves the average error.
+
+This table gives the average (RMS) error for some PSNR values. The error unit is one 8-bit pixel value, on the scale 0–255.
+
+| PSNR | Average error | What you see |
+|---:|---:|---|
+| 50 dB | 0.8 | No visible difference |
+| 45 dB | 1.4 | No visible difference |
+| 40 dB | 2.6 | Very small differences |
+| 35 dB | 4.5 | Small differences on edges and texture |
+| 30 dB | 8.1 | Clear differences |
+| 25 dB | 14 | A different image |
+
+All values below come from the gray 4096² benchmark, with 5 levels ([benchmarks.md](benchmarks.md)).
+
+### Lossless files (the default)
+
+**Rule:** In lossless mode, each level decodes bit for bit. The PSNR of each level against its stored value is ∞. This is true for all modes.
+
+The modes do not calculate the coarse levels in the same way. The PSNR below compares the coarse levels of each mode with the `haar` levels, which are the exact 2×2 mean.
+
+**Important:** Here, PSNR measures difference only. It does not measure quality. A low value does not mean a bad image.
+
+| Mode | L1 | L2 | L3 | L4 | Meaning |
+|---|---:|---:|---:|---:|---|
+| `haar` | ∞ | ∞ | ∞ | ∞ | This is the reference: the 2×2 mean. |
+| `naive` or `laplacian`, with `--down box` | 50.2 dB | 45.6 dB | 42.4 dB | 40.0 dB | Almost the same as `haar`. Only the rounding is different, and the difference increases at each level. |
+| `laplacian`, with `--down gauss` | 30.1 dB | 29.8 dB | 29.6 dB | 29.5 dB | A smoother image. It has less aliasing. |
+| `cdf53` | 27.6 dB | 25.5 dB | 24.8 dB | 24.5 dB | A sharper image, as in JPEG2000. It also has a half-pixel shift. |
+
+`naive` with `--down gauss` has the same levels as `laplacian` with `--down gauss`, because the two modes use the same filter.
+
+**Use this table to select a mode:**
+- If your image matcher needs the exact 2×2 mean, use `haar`.
+- If your image matcher needs less aliasing, use `cdf53` or `gauss`.
+
+### Lossy files (`--quant Q`)
+
+With `--quant Q`, the encoder removes small details to make the file smaller. Q is the quantizer step. A large Q gives a small file and a low PSNR.
+
+In this part, PSNR compares the decoded image with the source image. Here, a high PSNR means better quality.
+
+#### `haar`
+
+| Q | Size (bits/px) | PSNR at L0 | PSNR at L2 | Maximum error |
+|---:|---:|---:|---:|---:|
+| 2 | 4.56 | 40.3 dB | 45.1 dB | 8 |
+| 4 | 3.66 | 38.6 dB | 42.7 dB | 12 |
+| 8 | 2.90 | 35.1 dB | 38.5 dB | 21 |
+
+- `haar` gives the lowest PSNR of the three lossy modes.
+- The error increases from the coarse levels to L0, because the encoder does not correct errors between levels. This is "open loop". Thus L2 is 3–5 dB better than L0.
+- `haar` does not have a maximum-error limit.
+
+#### `cdf53`
+
+| Q | Size (bits/px) | PSNR at L0 | PSNR at L2 | Maximum error |
+|---:|---:|---:|---:|---:|
+| 2 | 4.43 | 44.5 dB | 47.0 dB | 8 |
+| 4 | 3.53 | 41.9 dB | 43.6 dB | 11 |
+| 8 | 2.77 | 37.1 dB | 38.6 dB | 22 |
+
+- `cdf53` is the best lossy `.prmd` mode. At each Q, it is 2–4 dB better than `haar`, and its file is slightly smaller.
+- It is also open loop: L2 is 1.5–2.5 dB better than L0.
+- `cdf53` does not have a maximum-error limit.
+
+#### `laplacian`, with `--down gauss`
+
+| Q | Size (bits/px) | PSNR at L0 | PSNR at L2 | Maximum error |
+|---:|---:|---:|---:|---:|
+| 2 | 5.90 | 51.2 dB | 51.1 dB | 1 |
+| 4 | 4.72 | 46.4 dB | 46.4 dB | 2 |
+| 8 | 3.71 | 40.8 dB | 40.8 dB | 4 |
+
+- `laplacian` gives the highest PSNR at each Q.
+- It is "closed loop": the encoder corrects the errors at each level. Thus all levels have the same PSNR.
+- **This is the only mode with a guaranteed limit.** The error at each pixel is never more than Q/2.
+- Its files are approximately one third larger than `cdf53` files at the same Q.
+- For the same file size, `cdf53` gives a higher PSNR. For example, at 3.71 bits/px `laplacian` gives 40.8 dB, while at 3.53 bits/px `cdf53` gives 41.9 dB.
+- Thus, use `laplacian` when you need the error limit. Do not use it for the smallest file.
+
+#### `naive`
+
+`naive` is lossless only. The encoder does not accept `--quant` with `naive`.
+
+#### JPEG2000 (for comparison)
+
+| Size (bits/px) | 3.94 | 3.14 | 2.35 | 1.54 |
+|---|---:|---:|---:|---:|
+| PSNR at L0 | 49.1 dB | 44.7 dB | 39.8 dB | 34.8 dB |
+| Maximum error | 7 | 10 | 22 | 56 |
+
+- JPEG2000 gives approximately 3 dB more than `cdf53` for the same file size.
+- For the same PSNR, it needs approximately 25% fewer bits.
+- But its crops decode 15–26 times more slowly than `.prmd` crops.
+
+### RGB images
+
+- Lossless RGB is also bit for bit (∞ dB).
+- The encoder quantizes the Y, Co and Cg channels, not the R, G and B channels. Thus the `laplacian` limit of Q/2 does not apply to each RGB channel. In the benchmark, the maximum RGB error is equal to Q.
+- On RGB, the JPEG2000 advantage is larger. At approximately 40 dB, JPEG2000 needs 3.2 bits/px and `cdf53` needs 6.7 bits/px.
+
+### Summary
+
+| You need | Use this mode | Why (PSNR) |
+|---|---|---|
+| Exact pixels and the 2×2 mean at each level | `haar`, lossless | ∞ dB at each level, and the levels are the reference |
+| Coarse levels with less aliasing | `cdf53` or `gauss`, lossless | ∞ dB at each level, but a different filter (24–30 dB from `haar`) |
+| The smallest lossy file | `cdf53` with `--quant` | 2–4 dB better than `haar` for a slightly smaller file |
+| A guaranteed maximum error | `laplacian` with `--quant` | Error never more than Q/2, with the same PSNR at all levels |
+| The best quality for each bit, when crop speed is not important | JPEG2000 | Approximately 3 dB better than `cdf53`, but 15–26 times slower crops |
+
 ## Not a mode: JPEG2000
 
 `--codec j2k` writes a JPEG2000 file with OpenJPEG instead of `.prmd`, for comparison. Its levels are 5/3 wavelet levels, like `cdf53`'s.
 - `--j2k-tile`: tile size, default 256.
 - `--j2k-lossy-psnr DB`: switches to the lossy 9/7 wavelet and aims for that PSNR.
 
-`--levels` and `--color` work as for `.prmd`, and the other options are ignored. JPEG2000 makes 6.4% smaller lossless files than `haar` (10.84 MiB), but crops are 15–26× slower, and coarse-level crops read most of the file. See [WRITEUP.md](WRITEUP.md).
+`--levels` and `--color` work as for `.prmd`, and the other options are ignored. JPEG2000 makes 6.4% smaller lossless files than `haar` (10.84 MiB), but crops are 15–26× slower, and coarse-level crops read most of the file. See [writeup.md](writeup.md).

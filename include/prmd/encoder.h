@@ -51,7 +51,7 @@ struct EncodeOptions {
   int cblk = 128;  // code-block = independently decodable unit; even, >= 16
   // 0 = lossless; Q > 0 = lossy quantizer step (haar/cdf53/laplacian only).
   int quant = 0;
-  // Default: see DESIGN.md §7.1 (decision record).
+  // Default: see design.md §7.1 (decision record).
   Entropy entropy = Entropy::Zstd;
   // 0 = coder default. Zstd: 1..22 (default 1). Range, Raw: must be 0.
   int entropy_level = 0;
