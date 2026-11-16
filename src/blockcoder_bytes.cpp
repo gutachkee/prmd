@@ -11,6 +11,7 @@
 
 #include "prmd/errors.h"
 #include "prmd/internal/blockcoder.h"
+#include "prmd/profile.h"
 
 namespace prmd::internal {
 namespace {
@@ -33,6 +34,7 @@ size_t packed_size(const BlockPlanes& io) {
 }
 
 void pack(const BlockPlanes& in, std::vector<uint8_t>& buf) {
+  PRMD_TIMED("pack");
   const size_t n = samples_per_plane(in);
   buf.resize(in.planes.size() * n * 2);
 
@@ -54,6 +56,7 @@ void pack(const BlockPlanes& in, std::vector<uint8_t>& buf) {
 }
 
 void unpack(const uint8_t* buf, BlockPlanes& io) {
+  PRMD_TIMED("unpack");
   const size_t n = samples_per_plane(io);
   io.planes.assign(io.kinds.size(), std::vector<int32_t>(n));
 
@@ -95,6 +98,7 @@ class ZstdBlockCoder final : public BlockCoder {
     std::vector<uint8_t> buf;
     pack(in, buf);
 
+    PRMD_TIMED("zstd_compress");
     const size_t start = out.size();
     out.resize(start + ZSTD_compressBound(buf.size()));
     const size_t r = ZSTD_compress(out.data() + start, out.size() - start,
@@ -109,9 +113,12 @@ class ZstdBlockCoder final : public BlockCoder {
               size_t size,
               BlockPlanes& io) const override {
     std::vector<uint8_t> buf(packed_size(io));
-    const size_t r = ZSTD_decompress(buf.data(), buf.size(), data, size);
-    if (ZSTD_isError(r) || r != buf.size()) {
-      throw FormatError("zstd block: corrupt payload");
+    {
+      PRMD_TIMED("zstd_decompress");
+      const size_t r = ZSTD_decompress(buf.data(), buf.size(), data, size);
+      if (ZSTD_isError(r) || r != buf.size()) {
+        throw FormatError("zstd block: corrupt payload");
+      }
     }
     unpack(buf.data(), io);
   }

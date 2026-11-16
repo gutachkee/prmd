@@ -19,6 +19,7 @@
 #include "prmd/errors.h"
 #include "prmd/internal/blockcoder.h"
 #include "prmd/internal/rangecoder.h"
+#include "prmd/profile.h"
 
 namespace prmd::internal {
 namespace {
@@ -195,6 +196,7 @@ class RangeBlockCoder final : public BlockCoder {
   Entropy id() const override { return Entropy::Range; }
 
   void encode(const BlockPlanes& in, std::vector<uint8_t>& out) const override {
+    PRMD_TIMED("range_encode");
     Models models;
     RangeEncoder enc(out);
 
@@ -214,6 +216,7 @@ class RangeBlockCoder final : public BlockCoder {
   void decode(const uint8_t* data,
               size_t size,
               BlockPlanes& io) const override {
+    PRMD_TIMED("range_decode");
     Models models;
     RangeDecoder dec(data, size);
     const size_t n = size_t(io.w) * size_t(io.h);

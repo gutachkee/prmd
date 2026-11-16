@@ -13,6 +13,7 @@
 #include "prmd/internal/prmd_format.h"
 #include "prmd/internal/timing.h"
 #include "prmd/internal/transform.h"
+#include "prmd/profile.h"
 
 namespace prmd::internal {
 
@@ -87,7 +88,10 @@ Decomposition decompose(const Image& src,
   Decomposition out;
   out.levels.resize(size_t(num_levels));
   out.bands.resize(size_t(num_levels));
-  out.levels[0] = to_planes(src);
+  {
+    PRMD_TIMED("to_planes");
+    out.levels[0] = to_planes(src);
+  }
 
   for (int level = 0; level + 1 < num_levels; ++level) {
     out.bands[size_t(level)].resize(size_t(channels));
@@ -95,8 +99,10 @@ Decomposition decompose(const Image& src,
       const Region& fine = out.levels[size_t(level)][size_t(c)];
       Region coarse;
       if (xf) {
+        PRMD_TIMED("forward");
         xf->forward(fine, coarse, out.bands[size_t(level)][size_t(c)]);
       } else {
+        PRMD_TIMED("downsample");
         coarse = downsample(fine, down);
       }
       out.levels[size_t(level + 1)].push_back(std::move(coarse));
@@ -116,12 +122,22 @@ void store_wavelet_bands(const Decomposition& pyr,
   for (int level = 0; level + 1 < num_levels; ++level) {
     Planes& dst = stored[size_t(level)];
     for (int b = 0; b < xf.num_bands(); ++b) {
-      for (int c = 0; c < channels; ++c) {
-        dst.push_back(pyr.bands[size_t(level)][size_t(c)][size_t(b)]);
+      {
+        PRMD_TIMED("copy_bands");
+        for (int c = 0; c < channels; ++c) {
+          dst.push_back(pyr.bands[size_t(level)][size_t(c)][size_t(b)]);
+        }
       }
       const size_t first = size_t(b * channels);
-      color_forward(dst, first, channels);
-      quantize_planes(dst, first, channels, band_step(xf.band_kind(b), quant));
+      {
+        PRMD_TIMED("ycocg_forward");
+        color_forward(dst, first, channels);
+      }
+      {
+        PRMD_TIMED("quantize");
+        quantize_planes(dst, first, channels,
+                        band_step(xf.band_kind(b), quant));
+      }
     }
   }
 }
@@ -148,22 +164,42 @@ void store_laplacian_residuals(const Decomposition& pyr,
     Planes pred(static_cast<size_t>(channels));
     Planes res(static_cast<size_t>(channels));
     for (int c = 0; c < channels; ++c) {
-      const Planes zero{Region(full)};
-      xf.inverse(recon[size_t(c)], zero, full, fd, pred[size_t(c)]);
+      {
+        PRMD_TIMED("predict_upsample");
+        const Planes zero{Region(full)};
+        xf.inverse(recon[size_t(c)], zero, full, fd, pred[size_t(c)]);
+      }
+      PRMD_TIMED("subtract");
       res[size_t(c)] = Region(full);
       for (size_t i = 0; i < res[size_t(c)].v.size(); ++i) {
         res[size_t(c)].v[i] = exact[size_t(c)].v[i] - pred[size_t(c)].v[i];
       }
     }
 
-    color_forward(res, 0, channels);
-    quantize_planes(res, 0, channels, step);
-    stored[size_t(level)] = res;
+    {
+      PRMD_TIMED("ycocg_forward");
+      color_forward(res, 0, channels);
+    }
+    {
+      PRMD_TIMED("quantize");
+      quantize_planes(res, 0, channels, step);
+    }
+    {
+      PRMD_TIMED("copy_residuals");
+      stored[size_t(level)] = res;
+    }
 
     // Reconstruct exactly as the decoder will: dequantize → inverse color →
     // U(recon) + residual.
-    dequantize_planes(res, 0, channels, step);
-    color_inverse(res, 0, channels);
+    {
+      PRMD_TIMED("dequantize");
+      dequantize_planes(res, 0, channels, step);
+    }
+    {
+      PRMD_TIMED("ycocg_inverse");
+      color_inverse(res, 0, channels);
+    }
+    PRMD_TIMED("reconstruct_upsample");
     Planes next(static_cast<size_t>(channels));
     for (int c = 0; c < channels; ++c) {
       const Planes band{res[size_t(c)]};
@@ -188,6 +224,7 @@ std::vector<Planes> stored_planes(const Decomposition& pyr,
 
   for (int level = num_levels - 1; level >= 0; --level) {
     if (geom[size_t(level)].base) {
+      PRMD_TIMED("copy_base");
       stored[size_t(level)] = pyr.levels[size_t(level)];
       color_forward(stored[size_t(level)], 0, channels);
     }
@@ -197,8 +234,10 @@ std::vector<Planes> stored_planes(const Decomposition& pyr,
     return stored;  // Independent: every level is a base level
   }
   if (opts.transform == Transform::Laplacian) {
+    PRMD_TIMED("laplacian_residuals");
     store_laplacian_residuals(pyr, geom, *xf, channels, opts.quant, stored);
   } else {
+    PRMD_TIMED("wavelet_bands");
     store_wavelet_bands(pyr, *xf, channels, opts.quant, stored);
   }
   return stored;
@@ -221,7 +260,12 @@ BlockPlanes make_block(const Planes& stored,
     bp.w = pixels.w;
     bp.h = pixels.h;
     for (int c = 0; c < channels; ++c) {
-      const std::vector<int32_t> px = extract(stored[size_t(c)], pixels);
+      std::vector<int32_t> px;
+      {
+        PRMD_TIMED("extract");
+        px = extract(stored[size_t(c)], pixels);
+      }
+      PRMD_TIMED("med_residual");
       std::vector<int32_t> res(px.size());
       med_residual(px.data(), pixels.w, pixels.h, res.data());
       bp.planes.push_back(std::move(res));
@@ -233,6 +277,7 @@ BlockPlanes make_block(const Planes& stored,
   const Rect samples = xf->band_rect_of_block(pixels, Dims{g.w, g.h});
   bp.w = samples.w;
   bp.h = samples.h;
+  PRMD_TIMED("extract");
   for (int b = 0; b < xf->num_bands(); ++b) {
     for (int c = 0; c < channels; ++c) {
       bp.planes.push_back(extract(stored[size_t(b * channels + c)], samples));
@@ -269,8 +314,12 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
       const uint32_t id = g.first_block + local;
 
       if (bx < g.blocks_x && by < g.blocks_y) {
-        const BlockPlanes bp =
-            make_block(stored[size_t(level)], g, xf, cblk, channels, bx, by);
+        BlockPlanes bp;
+        {
+          PRMD_TIMED("make_block");
+          bp = make_block(stored[size_t(level)], g, xf, cblk, channels, bx, by);
+        }
+        PRMD_TIMED("entropy_encode");
         coder.encode(bp, out.data);
         if (out.data.size() > 0xFFFFFFFFull) {
           throw std::runtime_error("encoded data exceeds 4 GiB");
@@ -360,13 +409,18 @@ void validate_prmd_options(const EncodeOptions& o) {
 EncodeReport encode_prmd(const Image& src_in,
                          const std::string& path,
                          const EncodeOptions& opts) {
+  PRMD_TIMED("encode_prmd");
   const auto start = Clock::now();
   validate_prmd_options(opts);
   if (src_in.width <= 0 || src_in.height <= 0) {
     throw std::invalid_argument("empty source image");
   }
 
-  const Image src = convert(src_in, opts.color);
+  Image src;
+  {
+    PRMD_TIMED("convert");
+    src = convert(src_in, opts.color);
+  }
   const int channels = src.channels();
 
   std::unique_ptr<LevelTransform> xf;
@@ -381,18 +435,35 @@ EncodeReport encode_prmd(const Image& src_in,
     total_blocks += g.num_ids;
   }
 
-  const Decomposition pyr =
-      decompose(src, opts.levels, xf.get(), opts.downsampler);
-  const std::vector<Planes> stored =
-      stored_planes(pyr, geom, xf.get(), opts, channels);
+  Decomposition pyr;
+  {
+    PRMD_TIMED("decompose");
+    pyr = decompose(src, opts.levels, xf.get(), opts.downsampler);
+  }
+  std::vector<Planes> stored;
+  {
+    PRMD_TIMED("stored_planes");
+    stored = stored_planes(pyr, geom, xf.get(), opts, channels);
+  }
 
   const auto coder = make_block_coder(opts.entropy, opts.entropy_level);
-  const EncodedBlocks blocks = encode_blocks(stored, geom, xf.get(), *coder,
-                                             total_blocks, opts.cblk, channels);
+  EncodedBlocks blocks;
+  {
+    PRMD_TIMED("encode_blocks");
+    blocks = encode_blocks(stored, geom, xf.get(), *coder, total_blocks,
+                           opts.cblk, channels);
+  }
 
   PrmdHeader header = make_header(opts, src, total_blocks);
-  const auto head = serialize(header, level_table(geom), blocks.offsets);
-  write_file(path, head, blocks.data);
+  std::vector<uint8_t> head;
+  {
+    PRMD_TIMED("serialize");
+    head = serialize(header, level_table(geom), blocks.offsets);
+  }
+  {
+    PRMD_TIMED("write_file");
+    write_file(path, head, blocks.data);
+  }
 
   EncodeReport report;
   report.level_bytes = blocks.level_bytes;

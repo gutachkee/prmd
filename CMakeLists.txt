@@ -12,6 +12,7 @@ endif()
 
 option(PRMD_NATIVE "Tune for the build host CPU (-mcpu=native)" ON)
 option(PRMD_BUILD_TESTS "Build unit tests" ON)
+option(PRMD_PROFILE "Compile the PRMD_TIMED pipeline timers in (include/prmd/profile.h)" OFF)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -48,17 +49,25 @@ set(PRMD_CORE_SOURCES
   src/crop_decoder.cpp
   src/encoder.cpp
   src/j2k_codec.cpp
+  src/profile.cpp
 )
 
 add_library(prmd_core STATIC ${PRMD_CORE_SOURCES})
 target_include_directories(prmd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(prmd_core PUBLIC JPEG::JPEG PNG::PNG PkgConfig::ZSTD PkgConfig::OPENJP2)
+if(PRMD_PROFILE)
+  # PUBLIC, so tools linking prmd_core see the same PRMD_TIMED and kEnabled.
+  target_compile_definitions(prmd_core PUBLIC PRMD_PROFILE)
+endif()
 
 add_executable(prmd tools/prmd_cli.cpp)
 target_link_libraries(prmd PRIVATE prmd_core)
 
 add_executable(prmdbench bench/prmdbench.cpp)
 target_link_libraries(prmdbench PRIVATE prmd_core)
+
+add_executable(prmdpipeline tools/prmd_pipeline.cpp)
+target_link_libraries(prmdpipeline PRIVATE prmd_core)
 
 if(PRMD_BUILD_TESTS)
   enable_testing()

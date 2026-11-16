@@ -1,6 +1,6 @@
 # Prmd: random-access crops from a single-file image pyramid
 
-`prmd` stores an image and its 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**. That's **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). A random 256² crop decodes in **0.3–0.6 ms** at any level, and the whole pyramid encodes in **87 ms**.
+`prmd` stores an image and its 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**. That's **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). On one core of a MacBook Pro (Apple Silicon), a random 256² crop decodes in **0.3–0.6 ms** at any level, and the whole pyramid encodes in **85 ms**.
 
 Modes and their options are explained with worked examples in [modes.md](modes.md). Interfaces and full design details are in [DESIGN.md](DESIGN.md).
 
@@ -42,7 +42,7 @@ The tests prove this. Every crop (inside a tile, across 2 and 4 tiles, edges, co
 
 **Color and lossy.** RGB uses the reversible YCoCg-R transform and stays bit-exact. `--quant Q` quantizes the detail or residual numbers. The decode path, and so random access, stays the same, and the coarsest level stays exact.
 
-**Why not JPEG2000?** It's built in as a backend (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better, but crops decode **14–26× slower** and encoding is 16× slower. Its access granularity is also poor at coarse levels: JPEG2000 tiles are defined at full resolution and each holds all its resolutions, so a 256² crop at L4 reads the **whole file** (10.8 MiB, against 44 KiB for `.prmd`).
+**Why not JPEG2000?** It's built in as a backend (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better, but crops decode **13–24× slower** and encoding is 17× slower. Its access granularity is also poor at coarse levels: JPEG2000 tiles are defined at full resolution and each holds all its resolutions, so a 256² crop at L4 reads the **whole file** (10.8 MiB, against 44 KiB for `.prmd`).
 
 **Embedded ARM.** About 2 kLOC of plain C++17 plus zstd, integer arithmetic only, no SIMD required. Decode memory is bounded by the crop plus about one block per level.
 
@@ -85,7 +85,7 @@ offset 0   ┌──────────────────────
 
 ## 4. Trade-offs
 
-All numbers come from `prmdbench` (commands in the README): the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at the default level 1, 300 random crops per row, one Apple AArch64 core, file in the page cache, run on 2026-11-16. Sizes are deterministic. Latencies vary by up to about 10% between runs, so compare them within one table rather than across runs.
+All numbers come from `prmdbench` (commands in the README): the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at the default level 1, 300 random crops per row, one core of a MacBook Pro's Apple Silicon processor (14 cores, Linux, AArch64), GCC 15.2 `-O2 -mcpu=native`, file in the page cache, run on 2026-11-16. Sizes are deterministic. Latencies vary by up to about 10% between runs, so compare them within one table rather than across runs. All times in this document are on that MacBook Pro. The same benchmark on a Raspberry Pi 5 is in [Pi5_stats.md](Pi5_stats.md).
 
 **Fewer bytes stored, more blocks per crop.** A crop also decodes the blocks of the coarser levels it's built from.
 
@@ -101,49 +101,49 @@ Per-crop latency and I/O. *Tiles* counts the distinct 256² tiles touched on eve
 
 | crop | level | haar mean / p95 | tiles · bytes | naive mean / p95 | tiles · bytes | J2K mean / p95 | tiles · bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 256² | L0 | 0.60 / 0.68 ms | 9.5 · 154 KiB | 0.58 / 0.70 ms | 4 · 101 KiB | 13.7 / 15.5 ms | 4 · 191 KiB |
-| 256² | L1 | 0.56 / 0.65 ms | 8.2 · 143 KiB | 0.55 / 0.62 ms | 4 · 103 KiB | 12.5 / 13.3 ms | 9 · 433 KiB |
-| 256² | L2 | 0.54 / 0.66 ms | 6.8 · 129 KiB | 0.53 / 0.58 ms | 4 · 99 KiB | 9.3 / 11.2 ms | 25 · 1.2 MiB |
-| 256² | L3 | 0.54 / 0.59 ms | 5.0 · 119 KiB | 0.52 / 0.55 ms | 4 · 99 KiB | 7.6 / 8.0 ms | 81 · 3.8 MiB |
-| 256² | L4 (whole level) | 0.25 / 0.27 ms | 1.0 · 44 KiB | 0.26 / 0.29 ms | 1 · 44 KiB | 6.4 / 6.7 ms | 256 · 10.8 MiB |
-| 512² | L0 | 1.70 / 1.87 ms | 17.4 · 362 KiB | 1.60 / 1.70 ms | 9 · 282 KiB | 34.7 / 38.1 ms | 9 · 429 KiB |
-| 512² | L1 | 1.61 / 1.74 ms | 15.7 · 346 KiB | 1.56 / 1.64 ms | 9 · 286 KiB | 34.0 / 35.5 ms | 25 · 1.2 MiB |
-| 512² | L2 | 1.60 / 1.64 ms | 14.0 · 331 KiB | 1.52 / 1.62 ms | 9 · 276 KiB | 28.2 / 28.9 ms | 81 · 3.8 MiB |
-| 512² | L3 (whole level) | 1.13 / 1.17 ms | 5.0 · 179 KiB | 1.00 / 1.07 ms | 4 · 176 KiB | 23.6 / 24.1 ms | 256 · 10.8 MiB |
+| 256² | L0 | 0.64 / 0.76 ms | 9.5 · 154 KiB | 0.60 / 0.73 ms | 4 · 101 KiB | 14.1 / 16.1 ms | 4 · 191 KiB |
+| 256² | L1 | 0.60 / 0.70 ms | 8.2 · 143 KiB | 0.57 / 0.63 ms | 4 · 103 KiB | 13.1 / 14.4 ms | 9 · 433 KiB |
+| 256² | L2 | 0.58 / 0.75 ms | 6.8 · 129 KiB | 0.56 / 0.61 ms | 4 · 99 KiB | 9.4 / 10.5 ms | 25 · 1.2 MiB |
+| 256² | L3 | 0.63 / 0.70 ms | 5.0 · 119 KiB | 0.57 / 0.71 ms | 4 · 99 KiB | 8.1 / 9.0 ms | 81 · 3.8 MiB |
+| 256² | L4 (whole level) | 0.30 / 0.36 ms | 1.0 · 44 KiB | 0.30 / 0.36 ms | 1 · 44 KiB | 7.1 / 8.3 ms | 256 · 10.8 MiB |
+| 512² | L0 | 1.71 / 1.90 ms | 17.4 · 362 KiB | 2.03 / 2.29 ms | 9 · 282 KiB | 38.0 / 42.3 ms | 9 · 429 KiB |
+| 512² | L1 | 1.65 / 1.81 ms | 15.7 · 346 KiB | 1.97 / 2.24 ms | 9 · 286 KiB | 36.8 / 39.1 ms | 25 · 1.2 MiB |
+| 512² | L2 | 1.70 / 1.81 ms | 14.0 · 331 KiB | 2.00 / 2.20 ms | 9 · 276 KiB | 30.4 / 31.7 ms | 81 · 3.8 MiB |
+| 512² | L3 (whole level) | 1.19 / 1.37 ms | 5.0 · 179 KiB | 1.32 / 1.50 ms | 4 · 176 KiB | 25.2 / 25.6 ms | 256 · 10.8 MiB |
 
-A `haar` crop decodes about 2× `naive`'s blocks and reads 1.5× its bytes, in exchange for a 23% smaller file, and is within 10% of `naive`'s speed. `haar`'s detail blocks need only a few adds and shifts per pixel, while `naive`'s pixel blocks run the MED predictor, which goes pixel by pixel. Decoding the whole of L0 and then cropping would cost 85 ms, about **140×** a crop. On a 1000-step random walk, a 64 MiB block cache brings a `haar` crop down to 0.19 ms.
+A `haar` crop decodes about 2× `naive`'s blocks and reads 1.3–1.5× its bytes, in exchange for a 23% smaller file. At 256² it is within 10% of `naive`'s speed, and at 512² it was 13–17% faster in this run. `haar`'s detail blocks need only a few adds and shifts per pixel, while `naive`'s pixel blocks run the MED predictor, which goes pixel by pixel. Decoding the whole of L0 and then cropping would cost 84 ms, about **130×** a crop. On a 1000-step random walk, a 64 MiB block cache brings a `haar` crop down to 0.19 ms.
 
 **Encode and decode time per mode.** Encode covers building and writing the whole 5-level pyramid of the 4096² image. Decode is a random crop at L0, or the whole of L0 or L1 at once.
 
 | mode | encode | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
 |---|---:|---:|---:|---:|---:|
-| `haar` | 87 ms | 0.60 / 0.68 ms | 1.70 / 1.87 ms | 85 ms | 19.8 ms |
-| `cdf53` | 342 ms | 0.80 / 0.92 ms | 2.49 / 2.72 ms | 262 ms | 45.2 ms |
-| `laplacian-box` | 271 ms | 0.79 / 0.90 ms | 2.30 / 2.44 ms | 115 ms | 27.5 ms |
-| `laplacian-gauss` | 293 ms | 0.75 / 0.88 ms | 2.11 / 2.26 ms | 106 ms | 24.5 ms |
-| `naive` | 102 ms | 0.58 / 0.70 ms | 1.60 / 1.70 ms | 95 ms | 23.0 ms |
-| JPEG2000, 256² tiles | 1403 ms | 13.7 / 15.5 ms | 34.7 / 38.1 ms | 1277 ms | 349 ms |
+| `haar` | 85 ms | 0.64 / 0.76 ms | 1.71 / 1.90 ms | 84 ms | 19.7 ms |
+| `cdf53` | 332 ms | 0.83 / 0.97 ms | 2.59 / 2.94 ms | 261 ms | 46.8 ms |
+| `laplacian-box` | 282 ms | 0.83 / 0.95 ms | 2.33 / 2.55 ms | 116 ms | 26.9 ms |
+| `laplacian-gauss` | 299 ms | 0.77 / 0.92 ms | 2.17 / 2.41 ms | 106 ms | 24.2 ms |
+| `naive` | 104 ms | 0.60 / 0.73 ms | 2.03 / 2.29 ms | 97 ms | 24.0 ms |
+| JPEG2000, 256² tiles | 1453 ms | 14.1 / 16.1 ms | 38.0 / 42.3 ms | 1376 ms | 373 ms |
 
-At zstd level 1, most of the encode time is the transform, so `haar` and `naive` encode 3–4× faster than `cdf53` and `laplacian`. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3× slower.
+At zstd level 1, most of the encode time is the transform, so `haar` and `naive` encode about 3× faster than `cdf53` and `laplacian`. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3–1.5× slower.
 
-**Encode speed vs. size: the zstd level.** Level 1 is the default. Level 19 encodes 15–30× slower (gray `haar`: 1.22 s instead of 87 ms) and decodes at the same speed. It makes gray lossless files no smaller, but RGB files about 4% smaller and lossy files 3–12% smaller. Pass `--entropy-level 19` when size matters more than encode time.
+**Encode speed vs. size: the zstd level.** Level 1 is the default. Level 19 encodes 4–34× slower (gray `haar`: 1.24 s instead of 85 ms; RGB `haar`: 9.2 s instead of 0.30 s) and decodes at the same speed. It makes gray lossless files no smaller, but RGB files 2.7–4.1% smaller and lossy files 3–12% smaller (the lossy figure is from an earlier run; the benchmark has no lossy zstd-19 row). Pass `--entropy-level 19` when size matters more than encode time.
 
-**Speed vs. size of the entropy coder.** zstd: 11.58 MiB at 0.60 ms per 256² crop. Range coder: 11.13 MiB at 7.4 ms. zstd is the default.
+**Speed vs. size of the entropy coder.** zstd: 11.58 MiB at 0.62 ms per 256² crop. Range coder: 11.13 MiB at 7.6 ms. zstd is the default.
 
 **Level definition.** `haar` levels are the exact 2×2 mean, but they alias. `cdf53` and `laplacian-gauss` levels are sharper or smoother and differ from the 2×2 mean by 24–30 dB PSNR, mostly a half-pixel shift. The image matcher's needs should decide the mode, not the codec. [modes.md](modes.md) has side-by-side samples.
 
-**Lossy** (`--quant Q`): max error is in 8-bit pixel values (0–255). Bits per pixel are at the default zstd level 1; level 19 makes them 3–4% smaller at Q = 4.
+**Lossy** (`--quant Q`): max error is in 8-bit pixel values (0–255). Bits per pixel are at the default zstd level 1.
 
 | codec | setting | bits/px | PSNR L0 | max err | 256² at L0 |
 |---|---|---:|---:|---:|---:|
-| haar | Q = 4 | 3.66 | 38.6 dB | 12 | 0.67 ms |
+| haar | Q = 4 | 3.66 | 38.6 dB | 12 | 0.69 ms |
 | cdf53 | Q = 4 | 3.53 | 41.9 dB | 11 | 0.87 ms |
-| laplacian-gauss | Q = 4 | 4.72 | 46.4 dB | **2** (±Q/2, guaranteed) | 0.86 ms |
-| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 8.8 ms |
+| laplacian-gauss | Q = 4 | 4.72 | 46.4 dB | **2** (±Q/2, guaranteed) | 0.89 ms |
+| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 9.1 ms |
 
 `haar` and `cdf53` quantize open loop, so errors pile up toward level 0. `laplacian` is closed loop and keeps every level within ±Q/2, at the cost of a larger file. JPEG2000 wins rate–distortion: 44.7 dB at 3.14 bits/px, where `cdf53` needs 3.53 bits/px for 41.9 dB. It gets there through rate-distortion-optimised truncation and the smoother 9/7 filter. `.prmd` decodes 10–13× faster.
 
-**RGB.** `haar` is 23.9 MiB (−22.5% vs `naive`) at 2.0 ms per 256² crop, or 22.9 MiB with `--entropy-level 19`. JPEG2000 is 21.0 MiB at 29 ms.
+**RGB** (100 crops per row). `haar` is 23.9 MiB (−22.5% vs `naive`) at 2.0 ms per 256² crop, or 22.9 MiB with `--entropy-level 19`. JPEG2000 is 21.0 MiB at 28 ms.
 
 ## 5. Limitations
 

@@ -28,7 +28,24 @@ cmake --build build -j
 ctest --test-dir build -j8 --output-on-failure    # 198 tests
 ```
 
-This produces `build/prmd` (CLI), `build/prmdbench` (benchmark) and `build/prmd_tests`.
+This produces `build/prmd` (CLI), `build/prmdbench` (benchmark), `build/prmdpipeline`
+(per-step pipeline timing) and `build/prmd_tests`.
+
+### Pipeline timers (off by default)
+
+The library marks each encode and decode step with `PRMD_TIMED("step")` (`include/prmd/profile.h`).
+Unless `PRMD_PROFILE` is defined, the macro expands to nothing and the timers are not in the
+binary. To compile them in, use a separate build directory:
+
+```sh
+cmake -B build-profile -DCMAKE_BUILD_TYPE=Release -DPRMD_PROFILE=ON && cmake --build build-profile -j
+build-profile/prmdpipeline test_image.jpg --runs 5                # per-step breakdown
+build/prmdpipeline test_image.jpg --runs 5                        # totals without timers
+```
+
+`prmdpipeline` encodes once and decodes 10 crops (`--mode`, `--color`, `--quant`, `--entropy`,
+`--entropy-level`, `--cblk`, `--cache-mib` change the scenario). Results and method:
+[`docs/pipeline_durations.md`](docs/pipeline_durations.md).
 
 ## Use
 

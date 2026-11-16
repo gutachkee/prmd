@@ -10,6 +10,7 @@
 #include <png.h>
 
 #include "prmd/errors.h"
+#include "prmd/profile.h"
 
 namespace prmd {
 
@@ -172,6 +173,9 @@ bool is_png_signature(const unsigned char* sig, size_t n) {
 }  // namespace
 
 Image load_image(const std::string& path) {
+  // Outside load_jpeg: its libjpeg error path longjmps, which would skip a
+  // timer's destructor inside that frame.
+  PRMD_TIMED("load_image");
   FilePtr f = open_file(path, "rb");
   unsigned char sig[8] = {0};
   const size_t n = std::fread(sig, 1, sizeof(sig), f.get());

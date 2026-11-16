@@ -16,6 +16,7 @@
 #include "prmd/internal/prmd_codec.h"
 #include "prmd/internal/prmd_format.h"
 #include "prmd/internal/transform.h"
+#include "prmd/profile.h"
 
 namespace prmd::internal {
 
@@ -89,6 +90,7 @@ class PrmdDecoder final : public CropDecoder {
  public:
   PrmdDecoder(const std::string& path, const DecoderOptions& opts)
       : file_(path), cache_(opts.cache_bytes) {
+    PRMD_TIMED("open_prmd");
     file_bytes_ = file_.size();
     read_header_and_index();
 
@@ -134,6 +136,7 @@ class PrmdDecoder final : public CropDecoder {
     TileSet tiles;
     const auto planes = reconstruct(level, r, stats, tiles);
     stats.tiles_touched = int(tiles.size());
+    PRMD_TIMED("from_planes");
     return from_planes(planes, h_.color);
   }
 
@@ -149,6 +152,7 @@ class PrmdDecoder final : public CropDecoder {
   };
 
   void read_header_and_index() {
+    PRMD_TIMED("read_header_index");
     if (file_bytes_ < kHeaderSize) {
       throw FormatError("file too small for a .prmd header");
     }
@@ -189,6 +193,7 @@ class PrmdDecoder final : public CropDecoder {
 
     if (g.base) {
       const auto blocks = fetch(level, r, stats, tiles);
+      PRMD_TIMED("copy_blocks");
       std::vector<Region> out(static_cast<size_t>(channels_), Region(r));
       for (const auto& b : blocks) {
         for (int c = 0; c < channels_; ++c) {
@@ -208,12 +213,16 @@ class PrmdDecoder final : public CropDecoder {
     std::vector<Region> out(static_cast<size_t>(channels_));
     std::vector<Region> bands(static_cast<size_t>(nb), Region(band_rect));
     for (int c = 0; c < channels_; ++c) {
-      for (int b = 0; b < nb; ++b) {
-        for (const auto& blk : blocks) {
-          copy_overlap(blk->planes[size_t(b * channels_ + c)],
-                       bands[size_t(b)]);
+      {
+        PRMD_TIMED("copy_blocks");
+        for (int b = 0; b < nb; ++b) {
+          for (const auto& blk : blocks) {
+            copy_overlap(blk->planes[size_t(b * channels_ + c)],
+                         bands[size_t(b)]);
+          }
         }
       }
+      PRMD_TIMED("inverse");
       xf_->inverse(coarse[size_t(c)], bands, r, fd, out[size_t(c)]);
     }
     return out;
@@ -234,21 +243,24 @@ class PrmdDecoder final : public CropDecoder {
 
     std::vector<BlockPtr> out;
     std::vector<Miss> misses;
-    for (int by = by0; by <= by1; ++by) {
-      for (int bx = bx0; bx <= bx1; ++bx) {
-        tiles.insert({level, tile_index(g, bx, by)});
-        const uint32_t id = block_id(g, bx, by);
-        if (BlockPtr b = cache_.enabled() ? cache_.get(id) : nullptr) {
-          ++stats.cache_hits;
-          out.push_back(std::move(b));
-        } else {
-          misses.push_back({id, bx, by});
+    {
+      PRMD_TIMED("block_lookup");
+      for (int by = by0; by <= by1; ++by) {
+        for (int bx = bx0; bx <= bx1; ++bx) {
+          tiles.insert({level, tile_index(g, bx, by)});
+          const uint32_t id = block_id(g, bx, by);
+          if (BlockPtr b = cache_.enabled() ? cache_.get(id) : nullptr) {
+            ++stats.cache_hits;
+            out.push_back(std::move(b));
+          } else {
+            misses.push_back({id, bx, by});
+          }
         }
       }
-    }
 
-    // Coalesce runs of consecutive ids (contiguous on disk) into one read.
-    std::sort(misses.begin(), misses.end());
+      // Coalesce runs of consecutive ids (contiguous on disk) into one read.
+      std::sort(misses.begin(), misses.end());
+    }
     for (size_t i = 0; i < misses.size();) {
       size_t j = i + 1;
       while (j < misses.size() && misses[j].id == misses[j - 1].id + 1) {
@@ -271,6 +283,7 @@ class PrmdDecoder final : public CropDecoder {
     const uint64_t end = offsets_[size_t((last - 1)->id) + 1];
     std::vector<uint8_t> buf(size_t(end - begin));
     if (!buf.empty()) {
+      PRMD_TIMED("pread");
       stats.read_calls +=
           file_.read_at(h_.data_offset + begin, buf.data(), buf.size());
     }
@@ -284,7 +297,10 @@ class PrmdDecoder final : public CropDecoder {
 
       ++stats.blocks_decoded;
       ++stats.blocks_per_level[size_t(level)];
-      cache_.put(id, blk);
+      if (cache_.enabled()) {
+        PRMD_TIMED("cache_put");
+        cache_.put(id, blk);
+      }
       out.push_back(std::move(blk));
     }
   }
@@ -294,6 +310,7 @@ class PrmdDecoder final : public CropDecoder {
                         int by,
                         const uint8_t* data,
                         size_t size) const {
+    PRMD_TIMED("decode_block");
     const LevelGeom& g = geom_[size_t(level)];
     const Rect pixels = block_pixel_rect(g, h_.cblk, bx, by);
     const Rect samples =
@@ -309,12 +326,16 @@ class PrmdDecoder final : public CropDecoder {
         bp.kinds.push_back(g.base ? Band::Base : xf_->band_kind(b));
       }
     }
-    coder_->decode(data, size, bp);
+    {
+      PRMD_TIMED("entropy_decode");
+      coder_->decode(data, size, bp);
+    }
 
     for (int b = 0; b < nb; ++b) {
       undo_block_coding(g.base, b, samples, bp);
     }
 
+    PRMD_TIMED("wrap_block");
     auto blk = std::make_shared<DecodedBlock>();
     for (auto& p : bp.planes) {
       Region reg;
@@ -336,6 +357,7 @@ class PrmdDecoder final : public CropDecoder {
     const size_t n = size_t(samples.w) * size_t(samples.h);
 
     if (base) {
+      PRMD_TIMED("med_reconstruct");
       for (int c = 0; c < channels_; ++c) {
         std::vector<int32_t> px(n);
         med_reconstruct(bp.planes[first + size_t(c)].data(), samples.w,
@@ -345,6 +367,7 @@ class PrmdDecoder final : public CropDecoder {
     } else {
       const int step = band_step(xf_->band_kind(b), h_.quant);
       if (step > 1) {
+        PRMD_TIMED("dequantize");
         for (int c = 0; c < channels_; ++c) {
           for (auto& v : bp.planes[first + size_t(c)]) {
             v = dequantize(v, step);
@@ -354,6 +377,7 @@ class PrmdDecoder final : public CropDecoder {
     }
 
     if (channels_ == 3) {
+      PRMD_TIMED("ycocg_inverse");
       ycocg_r_inverse(bp.planes[first].data(), bp.planes[first + 1].data(),
                       bp.planes[first + 2].data(), n);
     }

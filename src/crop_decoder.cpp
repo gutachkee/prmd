@@ -9,6 +9,7 @@
 #include "prmd/internal/j2k_codec.h"
 #include "prmd/internal/prmd_codec.h"
 #include "prmd/internal/prmd_format.h"
+#include "prmd/profile.h"
 
 namespace prmd {
 
@@ -33,6 +34,7 @@ void CropDecoder::check_level(int level, const Rect& r) const {
 }
 
 DecodeResult CropDecoder::decode(int level, const Rect& r) {
+  PRMD_TIMED("decode");
   check_level(level, r);
 
   const LevelInfo li = level_info(level);
@@ -62,6 +64,7 @@ DecodeResult CropDecoder::decode_clamped(int level, const Rect& r) {
 
 std::unique_ptr<CropDecoder> open_decoder(const std::string& path,
                                           const DecoderOptions& opts) {
+  PRMD_TIMED("open_decoder");
   unsigned char sig[kSignatureSize] = {0};
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
