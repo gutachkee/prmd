@@ -98,7 +98,7 @@ class HaarTransform final : public WaveletTransform {
 
     // Coarse row j depends on fine rows 2j, 2j+1 only. Every sample of
     // coarse and bands is written below.
-    parallel_rows(pool, c.h, 8 * c.w, [&](int j0, int j1) {
+    parallel_rows(pool, c.h, size_t(8) * size_t(c.w), [&](int j0, int j1) {
       for (int j = j0; j < j1; ++j) {
         for (int i = 0; i < c.w; ++i) {
           const int32_t a = rep(fine, 2 * i, 2 * j);
@@ -227,7 +227,7 @@ class Cdf53Transform final : public WaveletTransform {
     // Both written entirely by this pass.
     Samples lo_rows = uninitialized_samples(cw * size_t(ph));
     Samples hi_rows = uninitialized_samples(cw * size_t(ph));
-    parallel_rows(pool, ph, 2 * pw, [&](int y0, int y1) {
+    parallel_rows(pool, ph, size_t(2) * size_t(pw), [&](int y0, int y1) {
       std::vector<int32_t> line(static_cast<size_t>(pw));
       std::vector<int32_t> s(cw);
       std::vector<int32_t> d(cw);
@@ -250,7 +250,7 @@ class Cdf53Transform final : public WaveletTransform {
     auto vertical = [&](const Samples& rows, Region& lo,
                         Region& hi) {
       auto in = [&](int y) { return rows.data() + size_t(y) * cw; };
-      parallel_rows(pool, c.h, 3 * c.w, [&](int j0, int j1) {
+      parallel_rows(pool, c.h, size_t(3) * size_t(c.w), [&](int j0, int j1) {
         for (int j = j0; j < j1; ++j) {
           const int32_t* x0 = in(2 * j);
           const int32_t* x1 = in(2 * j + 1);
@@ -261,7 +261,7 @@ class Cdf53Transform final : public WaveletTransform {
           }
         }
       });
-      parallel_rows(pool, c.h, 3 * c.w, [&](int j0, int j1) {
+      parallel_rows(pool, c.h, size_t(3) * size_t(c.w), [&](int j0, int j1) {
         for (int j = j0; j < j1; ++j) {
           const int32_t* x0 = in(2 * j);
           const int32_t* dl = hi.row(j > 0 ? j - 1 : 0);
@@ -390,7 +390,7 @@ void upsample(Downsampler down,
   // Horizontal pass over the needed coarse rows. Both passes write every
   // sample of tmp and out.
   Region tmp(Rect{r.x, K.y, r.w, K.h}, kNoInit);
-  parallel_rows(pool, K.h, 2 * r.w, [&](int k0, int k1) {
+  parallel_rows(pool, K.h, size_t(2) * size_t(r.w), [&](int k0, int k1) {
     for (int j = K.y + k0; j < K.y + k1; ++j) {
       for (int x = r.x; x < r.right(); ++x) {
         tmp.at(x, j) =
@@ -401,7 +401,7 @@ void upsample(Downsampler down,
 
   // Vertical pass.
   out = Region(r, kNoInit);
-  parallel_rows(pool, r.h, 2 * r.w, [&](int y0, int y1) {
+  parallel_rows(pool, r.h, size_t(2) * size_t(r.w), [&](int y0, int y1) {
     for (int y = r.y + y0; y < r.y + y1; ++y) {
       for (int x = r.x; x < r.right(); ++x) {
         out.at(x, y) = up1(down, y, c.h, [&](int n) { return tmp.at(x, n); });
@@ -495,7 +495,7 @@ Region downsample_box(const Region& fine, Pool* pool) {
   const Dims c = half_up(dims_of(fine));
   Region out = whole_plane_uninit(c);  // every sample written below
 
-  parallel_rows(pool, c.h, 5 * c.w, [&](int j0, int j1) {
+  parallel_rows(pool, c.h, size_t(5) * size_t(c.w), [&](int j0, int j1) {
     for (int j = j0; j < j1; ++j) {
       for (int i = 0; i < c.w; ++i) {
         const int32_t sum =
@@ -516,7 +516,7 @@ Region downsample_gauss(const Region& fine, Pool* pool) {
 
   // Horizontal pass: c.w columns, every fine row.
   Region tmp(Rect{0, 0, c.w, fh}, kNoInit);  // every sample written
-  parallel_rows(pool, fh, 6 * c.w, [&](int y0, int y1) {
+  parallel_rows(pool, fh, size_t(6) * size_t(c.w), [&](int y0, int y1) {
     for (int y = y0; y < y1; ++y) {
       for (int i = 0; i < c.w; ++i) {
         int32_t s = 0;
@@ -530,7 +530,7 @@ Region downsample_gauss(const Region& fine, Pool* pool) {
 
   // Vertical pass and normalization by 16 × 16.
   Region out = whole_plane_uninit(c);
-  parallel_rows(pool, c.h, 6 * c.w, [&](int j0, int j1) {
+  parallel_rows(pool, c.h, size_t(6) * size_t(c.w), [&](int j0, int j1) {
     for (int j = j0; j < j1; ++j) {
       for (int i = 0; i < c.w; ++i) {
         int32_t s = 0;

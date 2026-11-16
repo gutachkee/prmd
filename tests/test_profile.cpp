@@ -10,6 +10,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "prmd/encoder.h"
 #include "prmd/internal/blockcoder.h"
@@ -146,6 +147,62 @@ TEST(ProfileThreads, ScopesOpenedOnlyOnWorkersStillAppear) {
 
 namespace {
 
+std::vector<std::string> paths() {
+  std::vector<std::string> out;
+  for (const auto& e : profile::snapshot()) {
+    out.push_back(e.path);
+  }
+  return out;
+}
+
+// Chunk i opens "a<i % 3>" and inside it "b<i % 5>" (names first appear in
+// different chunks), after a random delay so that workers take chunks in a
+// different order every run.
+void nested_scopes(Pool& pool, unsigned seed) {
+  static const char* const a[] = {"a0", "a1", "a2"};
+  static const char* const b[] = {"b0", "b1", "b2", "b3", "b4"};
+  std::vector<int> delay(48);
+  uint32_t r = seed * 2654435761u + 1;
+  for (int& d : delay) {
+    r = r * 1664525u + 1013904223u;
+    d = int((r >> 16) % 300);
+  }
+  PRMD_TIMED("outer");
+  pool.run(delay.size(), 1, [&](size_t b0, size_t e0) {
+    for (size_t i = b0; i < e0; ++i) {
+      busy_for(std::chrono::microseconds(delay[i]));
+      PRMD_TIMED(a[i % 3]);
+      PRMD_TIMED(b[(i * 7 + i / 3) % 5]);
+    }
+  });
+}
+
+}  // namespace
+
+TEST(ProfileThreads, EntryOrderIsTheSerialOrderWhateverTheScheduling) {
+  // snapshot() lists children in first-seen order; with worker trees merged
+  // that order must not depend on which thread ran which chunk: it is the
+  // order a serial loop creates them in.
+  std::vector<std::string> serial;
+  {
+    Pool one(1);
+    profile::reset();
+    nested_scopes(one, 1);
+    serial = paths();
+  }
+  ASSERT_EQ(serial.size(), 1u + 3u + 15u);
+  for (const int threads : {2, 4, 8}) {
+    Pool pool(threads);
+    for (unsigned rep = 0; rep < 20; ++rep) {
+      profile::reset();
+      nested_scopes(pool, rep + 2);
+      ASSERT_EQ(paths(), serial) << "threads " << threads << " rep " << rep;
+    }
+  }
+}
+
+namespace {
+
 // zstd coder that also spends 1 ms per block in a timed scope, so that the
 // block stage is long enough for every worker to take blocks.
 class SlowCoder final : public internal::BlockCoder {
@@ -194,6 +251,19 @@ TEST(ProfileThreads, MultithreadedEncodeCountsEveryBlock) {
     const EncodeReport r = internal::encode_prmd(src, path, o, &coder);
     EXPECT_EQ(r.threads, threads);
     runs[threads] = by_path();
+  }
+
+  // Entry order too: the same at every run and thread count.
+  std::vector<std::string> serial_order;
+  for (int rep = 0; rep < 4; ++rep) {
+    o.threads = rep == 0 ? 1 : 4;
+    profile::reset();
+    internal::encode_prmd(src, path, o, &coder);
+    if (rep == 0) {
+      serial_order = paths();
+    } else {
+      EXPECT_EQ(paths(), serial_order) << "run " << rep;
+    }
   }
 
   const auto& serial = runs[1];

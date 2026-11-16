@@ -68,6 +68,9 @@ struct Entry {
 void reset();
 
 // This thread's tree in depth-first order, children in first-seen order.
+// With worker trees merged that is still the order a serial run would have
+// created them in (the pool orders merged children by the lowest chunk index
+// that created them), so it does not depend on thread scheduling.
 // Empty when profiling is compiled out.
 std::vector<Entry> snapshot();
 

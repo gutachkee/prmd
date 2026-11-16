@@ -605,6 +605,65 @@ TEST(ParallelTransforms, PlanesFromImageEqualConvertThenSplit) {
   }
 }
 
+namespace {
+
+std::mutex g_stripe_m;
+std::set<std::thread::id> g_stripe_threads;
+
+void record_stripe(int, int) {
+  const std::lock_guard<std::mutex> lock(g_stripe_m);
+  g_stripe_threads.insert(std::this_thread::get_id());
+}
+
+struct StripeObserver {
+  StripeObserver() {
+    const std::lock_guard<std::mutex> lock(g_stripe_m);
+    g_stripe_threads.clear();
+    internal::test_hooks::set_row_stripe_observer(record_stripe);
+  }
+  ~StripeObserver() {
+    internal::test_hooks::set_row_stripe_observer(nullptr);
+  }
+  std::set<std::thread::id> threads() const {
+    const std::lock_guard<std::mutex> lock(g_stripe_m);
+    return g_stripe_threads;
+  }
+};
+
+}  // namespace
+
+TEST(ParallelTransforms, RowStripesRunOnWorkerThreads) {
+  using internal::Region;
+  // 2048² samples: hundreds of stripes per pass, enough for every worker.
+  const Region fine = random_plane(2048, 2048, 5, 0, 255);
+  for (const Transform t : {Transform::Haar, Transform::Cdf53}) {
+    const auto xf = internal::make_transform(t, Downsampler::Box);
+    internal::Pool pool(4);
+    ASSERT_EQ(pool.size(), 4);
+    const StripeObserver observer;
+    Region c;
+    std::vector<Region> b;
+    xf->forward(fine, c, b, &pool);
+    const auto ids = observer.threads();
+    EXPECT_GT(ids.size(), 1u) << to_string(t);
+    EXPECT_LE(ids.size(), 4u) << to_string(t);
+  }
+  {
+    internal::Pool pool(4);
+    const StripeObserver observer;
+    (void)internal::downsample(fine, Downsampler::Gauss, &pool);
+    EXPECT_GT(observer.threads().size(), 1u) << "gauss downsample";
+  }
+  // Serial: one stripe, on this thread.
+  const StripeObserver observer;
+  Region c;
+  std::vector<Region> b;
+  internal::make_transform(Transform::Haar, Downsampler::Box)
+      ->forward(fine, c, b, nullptr);
+  EXPECT_EQ(observer.threads(),
+            std::set<std::thread::id>{std::this_thread::get_id()});
+}
+
 // ----------------------------------------------------------------------------
 // Multithreaded files decode exactly
 
@@ -942,6 +1001,25 @@ TEST(ThreadsSerial, OneThreadStartsNoThreadAndMatchesTheGoldenFile) {
     EXPECT_EQ(mt.max_threads(), before + 3);
     EXPECT_EQ(process_threads(), before);
   }
+}
+
+TEST(ThreadsFallback, FewerWorkersThanRequestedStillWriteTheSameFile) {
+  // The system refuses threads after k workers (test hook): the encode runs
+  // on the threads it got, reports them, and writes the same file.
+  struct Reset {
+    ~Reset() { internal::test_hooks::set_worker_start_limit(-1); }
+  } reset;
+  const Case c = case_named("cdf53_1000x777_rgb");
+  for (const int k : {0, 1, 2}) {
+    internal::test_hooks::set_worker_start_limit(k);
+    for (const int n : {4, 16}) {
+      const Encoded e = encode_case(c, n, "fallback");
+      EXPECT_EQ(e.report.threads, 1 + k) << "k " << k << " threads " << n;
+      EXPECT_EQ(e.hash, golden().at(c.name)) << "k " << k << " threads " << n;
+    }
+  }
+  internal::test_hooks::set_worker_start_limit(-1);
+  EXPECT_EQ(encode_case(c, 4, "nofallback").report.threads, 4);
 }
 
 // ----------------------------------------------------------------------------

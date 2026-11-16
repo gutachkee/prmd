@@ -7,6 +7,7 @@
 
 #ifdef PRMD_PROFILE
 
+#include <cstddef>
 #include <memory>
 
 namespace prmd::profile::detail {
@@ -31,6 +32,20 @@ SubtreePtr end_worker();
 // Adds the nodes of `t` under `scope` (from current_scope() on this thread),
 // by name, as worker time. Call only on the thread that owns `scope`.
 void merge_worker(void* scope, Subtree& t);
+
+// Chunk [b, ...) of a Pool::run starts / ends on this thread. Nodes first
+// created inside a chunk remember (b, creation order within the chunk), so
+// that canonicalize() can restore the order a serial loop over [0, n) would
+// have created them in, whichever thread ran which chunk.
+void begin_chunk(size_t b);
+void end_chunk();
+
+// After every worker tree of a run has been merged under `scope`: orders the
+// children of every node below `scope` by first appearance in a serial run
+// (nodes that existed before the run first, in their order; then by the
+// lowest chunk that created them and their order within it) and forgets the
+// chunk keys. snapshot()'s entry order then does not depend on scheduling.
+void canonicalize(void* scope);
 
 }  // namespace prmd::profile::detail
 

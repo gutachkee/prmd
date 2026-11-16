@@ -10,6 +10,11 @@
 // callers write each index's result to its own slot, so the output is the
 // same for every thread count.
 //
+// Wake-ups: run() wakes only as many workers as the job has chunks beyond
+// the caller's first, and a worker that wakes after every chunk has been
+// claimed does not join, so run() never waits for a worker that had nothing
+// left to do (thread wake-up latency is tens of microseconds).
+//
 // Determinism of failures: if chunks throw, the exception of the LOWEST
 // failing chunk is rethrown on the calling thread once all workers are idle.
 // Chunks are claimed in increasing order, so every chunk below a failing one
@@ -20,7 +25,7 @@
 //
 // Profiling (PRMD_PROFILE): PRMD_TIMED scopes opened on workers are merged
 // into the calling thread's tree under the scope that was open around run(),
-// so the per-step numbers include worker time (see prmd/profile.h).
+// in the order a serial loop would have created them (see prmd/profile.h).
 
 #include <cstddef>
 #include <functional>
@@ -71,19 +76,38 @@ class Pool {
 // to split the levels of small images too.
 constexpr size_t kChunkSamples = size_t(1) << 14;
 
+// Row and sample loops of at most this many samples run inline on the
+// calling thread even with a pool: handing out two chunks costs about as
+// much as it saves (measured, docs/benchmarks.md).
+constexpr size_t kMinParallelSamples = 2 * kChunkSamples;
+
 // pool->run(n, grain, fn), or fn(0, n) when pool is null (the serial
 // encoder: no pool exists).
 void parallel_for(Pool* pool, size_t n, size_t grain, const Pool::Fn& fn);
 
-// fn(y0, y1) over row stripes of [0, h) for rows `width` samples wide, about
-// kChunkSamples samples per stripe; fn(0, h) when pool is null.
+// fn(y0, y1) over row stripes of [0, h) for rows that cost about
+// `row_samples` samples each, about kChunkSamples samples per stripe;
+// fn(0, h) when pool is null or h * row_samples <= kMinParallelSamples.
 void parallel_rows(Pool* pool,
                    int h,
-                   int width,
+                   size_t row_samples,
                    const std::function<void(int y0, int y1)>& fn);
 
 // fn(begin, end) over [0, n) in chunks of kChunkSamples; fn(0, n) when pool
-// is null.
+// is null or n <= kMinParallelSamples.
 void parallel_samples(Pool* pool, size_t n, const Pool::Fn& fn);
+
+// Test hooks (tests/test_parallel.cpp, tests/test_threads.cpp). Process-wide;
+// off unless a test sets them, and not for use outside tests.
+namespace test_hooks {
+// Pools start at most `k` worker threads from now on: starting the next one
+// fails as if the system refused (std::system_error), exercising the
+// fewer-threads fallback. k < 0 turns the limit off (the default).
+void set_worker_start_limit(int k);
+// Called with every row stripe parallel_rows hands out (on the thread that
+// runs it, before fn); nullptr turns it off (the default).
+using RowStripeObserver = void (*)(int y0, int y1);
+void set_row_stripe_observer(RowStripeObserver observer);
+}  // namespace test_hooks
 
 }  // namespace prmd::internal

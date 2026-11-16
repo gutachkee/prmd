@@ -44,8 +44,8 @@ std::vector<Region> to_planes(const Image& img,
   }
   const size_t w = size_t(img.width);
 
-  parallel_rows(pool, img.height, img.width * (in_ch + out_ch), [&](int y0,
-                                                                    int y1) {
+  const size_t row_samples = w * size_t(in_ch + out_ch);
+  parallel_rows(pool, img.height, row_samples, [&](int y0, int y1) {
     for (int y = y0; y < y1; ++y) {
       const uint8_t* src = img.row(y);
       if (img.format == stored) {

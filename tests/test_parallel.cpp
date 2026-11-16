@@ -1,12 +1,15 @@
 // Thread pool (include/prmd/internal/parallel.h): thread-count resolution,
-// coverage of [0, n), inline execution, lowest-index exception, reuse and
-// nesting.
+// coverage of [0, n), inline execution,
+// lowest-index exception, reuse, nesting, the fewer-threads fallback when
+// workers cannot be started, and row stripes on worker threads.
 
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <mutex>
 #include <random>
 #include <set>
@@ -19,11 +22,13 @@
 
 using prmd::internal::kChunkSamples;
 using prmd::internal::kMaxThreads;
+using prmd::internal::kMinParallelSamples;
 using prmd::internal::parallel_for;
 using prmd::internal::parallel_rows;
 using prmd::internal::parallel_samples;
 using prmd::internal::Pool;
 using prmd::internal::resolve_threads;
+namespace test_hooks = prmd::internal::test_hooks;
 
 namespace {
 
@@ -305,6 +310,126 @@ TEST(Pool, ConstructAndDestroyWithoutWork) {
     Pool pool(8);
     EXPECT_EQ(pool.size(), 8);
   }
+}
+
+TEST(Pool, FewerThreadsWhenWorkersCannotBeStarted) {
+  // The system refusing a thread (std::system_error from std::thread) is
+  // simulated after k workers: the pool keeps the ones it has.
+  struct Reset {
+    ~Reset() { test_hooks::set_worker_start_limit(-1); }
+  } reset;
+  for (const int k : {0, 1, 3}) {
+    test_hooks::set_worker_start_limit(k);
+    Pool pool(8);
+    EXPECT_EQ(pool.size(), 1 + k) << k;
+    for (const size_t n : {size_t(1), size_t(17), size_t(1000)}) {
+      expect_exact_cover(pool, n, 3);
+    }
+    std::mutex m;
+    std::set<std::thread::id> ids;
+    pool.run(64, 1, [&](size_t, size_t) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      const std::lock_guard<std::mutex> lock(m);
+      ids.insert(std::this_thread::get_id());
+    });
+    EXPECT_LE(ids.size(), size_t(1 + k));
+    // The lowest-index exception still wins with the reduced pool.
+    try {
+      pool.run(50, 1, [](size_t b, size_t e) {
+        for (size_t i = b; i < e; ++i) {
+          if (i == 7 || i == 30) {
+            throw std::out_of_range(std::to_string(i));
+          }
+        }
+      });
+      ADD_FAILURE() << "no exception";
+    } catch (const std::out_of_range& e) {
+      EXPECT_STREQ(e.what(), "7");
+    }
+  }
+  test_hooks::set_worker_start_limit(-1);
+  EXPECT_EQ(Pool(8).size(), 8);
+}
+
+TEST(Pool, ManyBackToBackSmallJobs) {
+  // Stages follow each other quickly: workers that are spinning or asleep
+  // must join (or be skipped) correctly every time.
+  Pool pool(6);
+  for (int round = 0; round < 3000; ++round) {
+    const size_t n = size_t(2 + round % 40);
+    std::atomic<uint64_t> sum{0};
+    pool.run(n, 1, [&](size_t b, size_t e) {
+      for (size_t i = b; i < e; ++i) {
+        sum.fetch_add(i + 1);
+      }
+    });
+    ASSERT_EQ(sum.load(), n * (n + 1) / 2) << round;
+    if (round % 500 == 499) {
+      // Let every worker fall asleep, then wake them again.
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+}
+
+namespace {
+
+std::mutex g_stripe_m;
+std::set<std::thread::id> g_stripe_threads;
+std::atomic<int> g_stripes{0};
+
+void record_stripe(int, int) {
+  g_stripes.fetch_add(1);
+  const std::lock_guard<std::mutex> lock(g_stripe_m);
+  g_stripe_threads.insert(std::this_thread::get_id());
+}
+
+}  // namespace
+
+TEST(ParallelHelpers, RowStripesRunOnWorkerThreads) {
+  struct Reset {
+    ~Reset() { test_hooks::set_row_stripe_observer(nullptr); }
+  } reset;
+  {
+    const std::lock_guard<std::mutex> lock(g_stripe_m);
+    g_stripe_threads.clear();
+  }
+  g_stripes = 0;
+  test_hooks::set_row_stripe_observer(record_stripe);
+  Pool pool(4);
+  const int h = 2000;
+  const size_t width = 1000;
+  std::vector<int> out(size_t(h), 0);
+  parallel_rows(&pool, h, width, [&](int y0, int y1) {
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+    for (int y = y0; y < y1; ++y) {
+      out[size_t(y)] = y;
+    }
+  });
+  for (int y = 0; y < h; ++y) {
+    ASSERT_EQ(out[size_t(y)], y);
+  }
+  EXPECT_GT(g_stripes.load(), 1);
+  EXPECT_GT(g_stripe_threads.size(), 1u);
+  EXPECT_LE(g_stripe_threads.size(), 4u);
+}
+
+TEST(ParallelHelpers, SmallLoopsRunInline) {
+  Pool pool(4);
+  const auto caller = std::this_thread::get_id();
+  int calls = 0;
+  parallel_samples(&pool, kMinParallelSamples, [&](size_t b, size_t e) {
+    ++calls;
+    EXPECT_EQ(b, 0u);
+    EXPECT_EQ(e, kMinParallelSamples);
+    EXPECT_EQ(std::this_thread::get_id(), caller);
+  });
+  parallel_rows(&pool, 32, kMinParallelSamples / 32, [&](int y0, int y1) {
+    ++calls;
+    EXPECT_EQ(y0, 0);
+    EXPECT_EQ(y1, 32);
+    EXPECT_EQ(std::this_thread::get_id(), caller);
+  });
+  EXPECT_EQ(calls, 2);
 }
 
 TEST(ParallelHelpers, NullPoolIsOneSerialCall) {
