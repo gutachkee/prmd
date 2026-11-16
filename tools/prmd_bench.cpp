@@ -4,12 +4,12 @@
 // usage: prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096]
 //                  [--color gray|rgb|both] [--codecs a,b,...]
 //                  [--out <exe dir>/bench/results.md] [--workdir DIR]
-//                  [--no-entropy-table] [--lossy] [--threads 1]
+//                  [--no-entropy-table] [--lossy] [--threads 0]
 //                  [--scaling 1,2,4,8,0]
 //
-// --threads N is EncodeOptions::threads for every encode (default 1, so the
-// encode times stay single-core and comparable with earlier reports; 0 = one
-// per hardware thread). Decoding is single-threaded. --scaling adds an
+// --threads N is EncodeOptions::threads for every encode (default 0 = one per
+// hardware thread; pass --threads 1 for the single-core encode times of the
+// published reports). Decoding is single-threaded. --scaling adds an
 // "Encode scaling" table: each --codecs codec encoded at every listed thread
 // count, with the speedup and a byte-identity check across counts.
 //
@@ -318,7 +318,7 @@ struct Args {
   std::vector<std::string> codecs;
   bool entropy_table = true;
   bool lossy = false;
-  int threads = 1;           // EncodeOptions::threads for every encode
+  int threads = 0;           // EncodeOptions::threads for every encode
   std::vector<int> scaling;  // thread counts for the scaling table
 };
 
@@ -392,7 +392,7 @@ Args parse(int argc, char** argv) {
                  "                 [--color gray|rgb|both] [--codecs a,b,...] "
                  "[--out <exe dir>/bench/results.md]\n"
                  "                 [--workdir DIR] [--no-entropy-table] "
-                 "[--lossy] [--threads 1]\n"
+                 "[--lossy] [--threads 0]\n"
                  "                 [--scaling 1,2,4,8,0]\n");
     std::exit(1);
   }

@@ -59,7 +59,7 @@ At zstd level 1, most of the encode time is the transform, so `haar` and `naive`
 
 ## Encode scaling (multithreaded encoder)
 
-`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`, the default). Run on 2026-11-16 on the same MacBook Pro (14 cores).
+`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`; the default is all hardware threads). Run on 2026-11-16 on the same MacBook Pro (14 cores).
 
 **Full image** (`test_image.jpg`, 8824 × 5336, 5 levels), `prmd encode` wall time in ms, median of 3 (1 for zstd 19). *base* is the encoder before threading (fc0a629); its N = 1 column differs from it only through single-thread fixes in the same change (row-major Cdf53 vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion).
 

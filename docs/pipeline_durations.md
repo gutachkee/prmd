@@ -17,7 +17,7 @@ Where does the time go when you encode an image once and then read about 10 crop
 | image | `test_image.jpg`: 8824 × 5336 RGB JPEG (47 MP, 13 MiB) |
 | pyramid | `--levels 6`, so L5 (276 × 167) is the coarsest level |
 | defaults | `haar`, `gray`, zstd level 1, `--cblk 128`, `--tile 256`, lossless, no cache |
-| machine | MacBook Pro, Apple Silicon (14 cores, aarch64) under Linux, GCC 15.2 `-O2 -mcpu=native`, zstd 1.5.7, single thread (`prmdpipeline --threads 1`, the default) except in [Multithreaded encode](#multithreaded-encode-update) |
+| machine | MacBook Pro, Apple Silicon (14 cores, aarch64) under Linux, GCC 15.2 `-O2 -mcpu=native`, zstd 1.5.7, single thread (`prmdpipeline --threads 1`) except in [Multithreaded encode](#multithreaded-encode-update) |
 | repeats | every scenario run 5 times in one process; each number is the median |
 | date | 2026-11-16 |
 

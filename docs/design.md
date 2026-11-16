@@ -243,8 +243,8 @@ EncodeReport encode_file(const Image& src, const std::string& out_path,
 - *Default.* `threads = 0` uses `std::thread::hardware_concurrency()` (1 if unknown). This
   default makes the library use all cores of the host, a change for embedders that call
   `encode_file` from their own worker threads: pass `threads = 1` there. The CLI has `--threads`
-  (§4.1); `prmdbench` and `prmdpipeline` default to 1, so their published numbers stay
-  single-core.
+  (§4.1); `prmdbench` and `prmdpipeline` default to all hardware threads too; their
+  published single-core numbers were taken with `--threads 1`.
 - *Count used.* `.prmd` uses at most one thread per present code-block (an image with a single
   block runs serially) and at most 256; `EncodeReport::threads` says how many it used. With one
   thread no pool exists: every stage runs its loop once on the calling thread, no thread is
@@ -617,8 +617,8 @@ prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096] [--color g
          [--out <exe dir>/bench/results.md] [--workdir DIR] [--no-entropy-table] [--lossy]
          [--threads 1] [--scaling 1,2,4,8,0]
 ```
-`--threads` is `EncodeOptions::threads` for every encode (default 1, so the encode column stays
-a single-core number comparable across reports). `--scaling` adds an "Encode scaling" table:
+`--threads` is `EncodeOptions::threads` for every encode (default 0 = all hardware
+threads; pass `--threads 1` for a single-core encode column comparable across reports). `--scaling` adds an "Encode scaling" table:
 each `--codecs` codec encoded at every listed thread count (0 = all hardware threads), median of
 3, with the speedup, the threads actually used and a byte-identity check across counts.
 Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 1); `+range`, `+raw`, `+zstd19`
@@ -638,7 +638,7 @@ Loads the image, encodes it once, then decodes a fixed navigation plan: one 256�
 from the coarsest down, then 4 pans/jumps at L0 (10 crops at `--levels 6`). Prints median wall
 times over `--runs`. Per-step timers (`PRMD_TIMED`, `include/prmd/profile.h`) are compiled in
 only with the CMake option `-DPRMD_PROFILE=ON` (default OFF); without it the macro expands to
-nothing. `--threads N` (default 1) sets the encoder threads; with N > 1 the breakdown adds an
+nothing. `--threads N` (default 0 = all hardware threads) sets the encoder threads; with N > 1 the breakdown adds an
 "on workers" column, and steps that ran on pool workers show time summed over threads (they can
 exceed their parent's wall time). Results and method: [pipeline_durations.md](pipeline_durations.md).
 

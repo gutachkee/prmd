@@ -57,14 +57,14 @@ binary. To compile them in, use a separate build directory:
 
 ```sh
 cmake -B build-profile -DCMAKE_BUILD_TYPE=Release -DPRMD_PROFILE=ON && cmake --build build-profile -j
-build-profile/prmdpipeline test_image.jpg --runs 5                # per-step breakdown
-build/prmdpipeline test_image.jpg --runs 5                        # totals without timers
+build-profile/prmdpipeline test_image.jpg --runs 5 --threads 1     # per-step breakdown, serial
+build/prmdpipeline test_image.jpg --runs 5 --threads 1            # totals without timers
 ```
 
 `prmdpipeline` encodes once and decodes one 256² crop per level (overview, then zooming in) plus
 4 pans and jumps at L0: 10 crops with the default `--levels 6`. `--levels`, `--mode`, `--down`,
 `--color`, `--quant`, `--entropy`, `--entropy-level`, `--tile`, `--cblk`, `--cache-mib` and
-`--threads` (encoder threads, default 1) change the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
+`--threads` (encoder threads, default 0 = all hardware threads) change the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
 (default `pipeline.prmd` in the current directory) and `--label` names the run in the report. Results and method:
 [`docs/pipeline_durations.md`](docs/pipeline_durations.md).
 
@@ -131,14 +131,14 @@ single-threaded; a decoder must not be shared between threads.
 ## Benchmark
 
 ```sh
-build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --threads 1
 build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
                 --codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,haar+range,haar+zstd19 \
-                --lossy --out build/bench/results_rgb.md
+                --lossy --out build/bench/results_rgb.md --threads 1
 ```
 
-Encodes run on one thread unless `--threads N` is given (0 = all hardware threads), so the
-encode column stays comparable with the published single-core tables. `--scaling 1,2,4,8,0`
+Encodes use all hardware threads unless `--threads N` is given; the commands above pass
+`--threads 1` so the encode column stays comparable with the published single-core tables. `--scaling 1,2,4,8,0`
 adds an encode-scaling table (time per thread count, speedup, and a check that every count
 writes the same file).
 

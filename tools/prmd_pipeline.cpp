@@ -19,8 +19,8 @@
 // Each number is the median over --runs runs. The timers add a little time,
 // so take totals from a build without them and shares from a build with them.
 //
-// --threads N is EncodeOptions::threads (default 1: a serial encode, as in
-// docs/pipeline_durations.md; 0 = one per hardware thread). With N > 1 the
+// --threads N is EncodeOptions::threads (default 0 = one per hardware thread;
+// --threads 1 gives the serial encode of docs/pipeline_durations.md). With N > 1 the
 // steps that run on pool workers (per block, per row stripe) report time
 // summed over all threads, so they can add up to more than their parent's
 // wall time; the "on workers" column gives the part measured on worker
@@ -30,7 +30,7 @@
 //          [--down box|gauss] [--color gray|rgb] [--quant Q]
 //          [--entropy zstd|range|raw] [--entropy-level N] [--tile 256]
 //          [--cblk 128] [--cache-mib 0] [--runs 5] [--file out.prmd]
-//          [--label text] [--threads 1]
+//          [--label text] [--threads 0]
 
 #include <algorithm>
 #include <chrono>
@@ -83,7 +83,7 @@ struct Options {
                "zstd|range|raw] [--entropy-level N]\n"
                "         [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] "
                "[--file out.prmd] [--label text]\n"
-               "         [--threads 1]\n",
+               "         [--threads 0]\n",
                why.c_str());
   std::exit(1);
 }
@@ -91,7 +91,6 @@ struct Options {
 Options parse(int argc, char** argv) {
   Options o;
   o.enc.levels = 6;
-  o.enc.threads = 1;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a.rfind("--", 0) != 0) {
