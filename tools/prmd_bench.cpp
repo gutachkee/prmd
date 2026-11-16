@@ -7,9 +7,10 @@
 //                  [--no-entropy-table] [--lossy] [--threads 0]
 //                  [--scaling 1,2,4,8,0]
 //
-// --threads N is EncodeOptions::threads for every encode (default 0 = one per
-// hardware thread; pass --threads 1 for the single-core encode times of the
-// published reports). Decoding is single-threaded. --scaling adds an
+// --threads N is EncodeOptions::threads for every encode (default 0 =
+// automatic: the library picks the count per image from its size, up to one
+// per hardware thread; pass --threads 1 for the single-core encode times of
+// the published reports). Decoding is single-threaded. --scaling adds an
 // "Encode scaling" table: each --codecs codec encoded at every listed thread
 // count, with the speedup and a byte-identity check across counts.
 //
@@ -26,6 +27,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +46,7 @@
 #include "prmd/image_io.h"
 #include "prmd/internal/timing.h"
 #include "prmd/pyramid.h"
+#include "tool_args.h"
 
 using namespace prmd;
 using prmd::internal::Clock;
@@ -339,14 +342,27 @@ Args parse(int argc, char** argv) {
       return argv[++i];
     };
 
+    // An integer option's value in [lo, hi], or a usage error.
+    auto number = [&](long long lo, long long hi) -> long long {
+      const std::string v = next();
+      long long x = 0;
+      if (!tools::parse_int(v, lo, hi, &x)) {
+        die(("%s expects an integer in " + std::to_string(lo) + ".." +
+             std::to_string(hi) + ", got '" + v + "'\n")
+                .c_str(),
+            s);
+      }
+      return x;
+    };
+
     if (s == "--levels") {
-      a.levels = std::stoi(next());
+      a.levels = int(number(1, kMaxLevels));
     } else if (s == "--iters") {
-      a.iters = std::stoi(next());
+      a.iters = int(number(1, INT_MAX));
     } else if (s == "--seed") {
-      a.seed = unsigned(std::stoul(next()));
+      a.seed = unsigned(number(0, UINT_MAX));
     } else if (s == "--size") {
-      a.size = std::stoi(next());
+      a.size = int(number(1, INT_MAX));
     } else if (s == "--color") {
       a.color = next();
     } else if (s == "--out") {
@@ -359,18 +375,14 @@ Args parse(int argc, char** argv) {
     } else if (s == "--lossy") {
       a.lossy = true;
     } else if (s == "--threads") {
-      a.threads = std::stoi(next());
-      if (a.threads < 0) {
-        die("--threads must be >= 0, got %s\n", std::to_string(a.threads));
-      }
+      // 0 = automatic; negative counts are refused (internal::validate_threads).
+      a.threads = int(number(0, INT_MAX));
     } else if (s == "--scaling") {
-      std::stringstream ss(next());
-      std::string n;
-      while (std::getline(ss, n, ',')) {
-        a.scaling.push_back(std::stoi(n));
-        if (a.scaling.back() < 0) {
-          die("--scaling: thread counts must be >= 0, got %s\n", n);
-        }
+      const std::string v = next();
+      if (!tools::parse_int_list(v, 0, INT_MAX, &a.scaling)) {
+        die("--scaling expects comma-separated thread counts >= 0 (0 = "
+            "automatic), e.g. 1,2,4,8,0; got '%s'\n",
+            v);
       }
     } else if (s == "--codecs") {
       std::stringstream ss(next());
@@ -910,7 +922,13 @@ void scaling_table(Run& run, std::ostringstream& md) {
   for (const int n : counts) {
     head.push_back(n == 0 ? "auto" : "N=" + std::to_string(n));
   }
-  head.push_back("speedup");
+  // Speedups are relative to the N=1 entry wherever it is in the list, or
+  // to the first entry when 1 is not listed.
+  const auto one = std::find(counts.begin(), counts.end(), 1);
+  const size_t base = one != counts.end() ? size_t(one - counts.begin()) : 0;
+  const std::string base_name =
+      counts[base] == 0 ? "auto" : "N=" + std::to_string(counts[base]);
+  head.push_back("best vs " + base_name);
   head.push_back("identical");
   Table t{head, {}};
 
@@ -922,8 +940,7 @@ void scaling_table(Run& run, std::ostringstream& md) {
     std::vector<std::string> row = {spec.name};
     std::vector<char> first_file;
     bool identical = true;
-    double first_ms = 0;
-    double last_ms = 0;
+    std::vector<double> ms(counts.size(), 0.0);
     for (size_t k = 0; k < counts.size(); ++k) {
       EncodeOptions o = spec.opt;
       o.threads = counts[k];
@@ -948,25 +965,31 @@ void scaling_table(Run& run, std::ostringstream& md) {
       std::vector<char> bytes((std::istreambuf_iterator<char>(f)), {});
       if (k == 0) {
         first_file = std::move(bytes);
-        first_ms = t_ms;
       } else if (bytes != first_file) {
         identical = false;
       }
-      last_ms = t_ms;
+      ms[k] = t_ms;
       row.push_back(fmt("%.0f ms", t_ms) +
                     (r.threads != counts[k] ? " (" + std::to_string(r.threads) +
                                                   " used)"
                                             : ""));
       fs::remove(p);
     }
-    row.push_back(fmt("%.2f×", first_ms / last_ms));
+    const size_t best = size_t(std::min_element(ms.begin(), ms.end()) - ms.begin());
+    const std::string best_name =
+        counts[best] == 0 ? "auto" : "N=" + std::to_string(counts[best]);
+    row.push_back(ms[best] > 0 ? fmt("%.2f×", ms[base] / ms[best]) + " (" +
+                                     best_name + ")"
+                               : "-");
     row.push_back(identical ? "yes" : "**NO**");
     t.rows.push_back(row);
   }
   md << "### Encode scaling (encode_file wall time, median of 3)\n\n"
-     << "Speedup: first column over the last. \"(k used)\": the encoder "
-        "used k threads (J2K: at most one per 4 code-blocks of a tile; "
-        "auto: one per hardware thread).\n\n"
+     << "Best vs " << base_name << ": the " << base_name
+     << " time over the fastest column's (named). \"(k used)\": the "
+        "encoder used k threads (J2K: at most one per 4 code-blocks of a "
+        "tile; auto: chosen from the image size, up to one per hardware "
+        "thread).\n\n"
      << t.str() << "\n";
 }
 
@@ -1020,8 +1043,10 @@ int main(int argc, char** argv) {
   md << "- CPU: " << cpu_model() << ", " << sysconf(_SC_NPROCESSORS_ONLN)
      << " cores (single-threaded decode)\n";
   md << "- encode threads: "
-     << (a.threads == 0 ? std::string("one per hardware thread")
-                        : std::to_string(a.threads))
+     << (a.threads == 0
+             ? std::string("automatic (chosen per image, up to one per "
+                           "hardware thread)")
+             : std::to_string(a.threads))
      << " (EncodeOptions::threads; the encode column of the file size "
         "table)\n";
   md << "- build: " << __VERSION__ << ", " << PRMD_BUILD_DESC << "\n";

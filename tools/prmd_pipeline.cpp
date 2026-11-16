@@ -19,7 +19,8 @@
 // Each number is the median over --runs runs. The timers add a little time,
 // so take totals from a build without them and shares from a build with them.
 //
-// --threads N is EncodeOptions::threads (default 0 = one per hardware thread;
+// --threads N is EncodeOptions::threads (default 0 = automatic, chosen from
+// the image size up to one per hardware thread;
 // --threads 1 gives the serial encode of docs/pipeline_durations.md). With N > 1 the
 // steps that run on pool workers (per block, per row stripe) report time
 // summed over all threads, so they can add up to more than their parent's
@@ -34,6 +35,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -45,6 +47,7 @@
 #include "prmd/encoder.h"
 #include "prmd/image_io.h"
 #include "prmd/profile.h"
+#include "tool_args.h"
 
 using namespace prmd;
 
@@ -104,8 +107,17 @@ Options parse(int argc, char** argv) {
       usage(a + " needs a value");
     }
     const std::string v = argv[++i];
+    // An integer option's value in [lo, hi], or a usage error.
+    auto number = [&](long long lo, long long hi) -> long long {
+      long long x = 0;
+      if (!tools::parse_int(v, lo, hi, &x)) {
+        usage(a + " expects an integer in " + std::to_string(lo) + ".." +
+              std::to_string(hi) + ", got '" + v + "'");
+      }
+      return x;
+    };
     if (a == "--levels") {
-      o.enc.levels = std::stoi(v);
+      o.enc.levels = int(number(1, kMaxLevels));
     } else if (a == "--mode") {
       if (v == "haar") {
         o.enc.transform = Transform::Haar;
@@ -123,7 +135,7 @@ Options parse(int argc, char** argv) {
     } else if (a == "--color") {
       o.enc.color = v == "rgb" ? ColorFormat::RGB8 : ColorFormat::Gray8;
     } else if (a == "--quant") {
-      o.enc.quant = std::stoi(v);
+      o.enc.quant = int(number(0, INT_MAX));
     } else if (a == "--entropy") {
       if (v == "zstd") {
         o.enc.entropy = Entropy::Zstd;
@@ -135,24 +147,22 @@ Options parse(int argc, char** argv) {
         usage("bad --entropy " + v);
       }
     } else if (a == "--entropy-level") {
-      o.enc.entropy_level = std::stoi(v);
+      o.enc.entropy_level = int(number(0, INT_MAX));
     } else if (a == "--tile") {
-      o.enc.tile = std::stoi(v);
+      o.enc.tile = int(number(1, INT_MAX));
     } else if (a == "--cblk") {
-      o.enc.cblk = std::stoi(v);
+      o.enc.cblk = int(number(1, INT_MAX));
     } else if (a == "--cache-mib") {
-      o.cache_bytes = size_t(std::stoul(v)) << 20;
+      o.cache_bytes = size_t(number(0, 1 << 20)) << 20;
     } else if (a == "--runs") {
-      o.runs = std::max(1, std::stoi(v));
+      o.runs = int(number(1, 100000));
     } else if (a == "--file") {
       o.file = v;
     } else if (a == "--label") {
       o.label = v;
     } else if (a == "--threads") {
-      o.enc.threads = std::stoi(v);
-      if (o.enc.threads < 0) {
-        usage("--threads must be >= 0");
-      }
+      // 0 = automatic; negative counts are refused.
+      o.enc.threads = int(number(0, INT_MAX));
     } else {
       usage("unknown option " + a);
     }
