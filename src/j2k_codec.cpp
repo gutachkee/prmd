@@ -27,6 +27,7 @@
 
 #include "prmd/errors.h"
 #include "prmd/internal/file.h"
+#include "prmd/internal/parallel.h"
 #include "prmd/internal/timing.h"
 
 namespace prmd::internal {
@@ -402,6 +403,10 @@ void validate_j2k_options(const EncodeOptions& o) {
   if (!o.j2k_lossless && o.j2k_psnr <= 0) {
     throw std::invalid_argument("lossy J2K needs j2k_psnr > 0");
   }
+  if (o.threads < 0) {
+    throw std::invalid_argument(
+        "threads must be >= 0 (0 = one per hardware thread)");
+  }
 }
 
 opj_cparameters_t make_encoder_params(const EncodeOptions& o, int channels) {
@@ -488,6 +493,19 @@ EncodeReport encode_j2k(const Image& src_in,
   if (!opj_encoder_set_extra_options(codec.get(), extra)) {
     throw std::runtime_error("J2K: TLM option rejected");
   }
+  // OpenJPEG's own thread pool. The output is byte-identical for every
+  // thread count (tests/test_threads.cpp). OpenJPEG codes the code-blocks of
+  // one tile at a time in parallel, so small tiles cannot use many threads
+  // (on test_image.jpg with 256² tiles, 4 threads encode 2.3× faster than
+  // 1 and 14 threads only 1.2×): use at most one thread per 4 code-blocks of
+  // a tile. A library without thread support refuses: encode on this thread.
+  const int64_t blocks_per_tile =
+      int64_t(o.j2k_tile / o.j2k_cblk) * int64_t(o.j2k_tile / o.j2k_cblk);
+  int threads = int(std::min<int64_t>(resolve_threads(o.threads),
+                                      std::max<int64_t>(blocks_per_tile / 4, 1)));
+  if (threads > 1 && !opj_codec_set_threads(codec.get(), threads)) {
+    threads = 1;
+  }
 
   StreamPtr stream(
       opj_stream_create_default_file_stream(path.c_str(), OPJ_FALSE));
@@ -508,6 +526,7 @@ EncodeReport encode_j2k(const Image& src_in,
   EncodeReport report;
   report.file_bytes = uint64_t(st.st_size);
   report.encode_ms = elapsed_ms(start);
+  report.threads = threads;
   return report;
 }
 
