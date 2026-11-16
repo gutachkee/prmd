@@ -4,7 +4,34 @@ The detailed tables behind [writeup.md](writeup.md). Modes are explained in [mod
 
 ## Setup
 
-All numbers come from `prmdbench` (commands in the README): the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at the default level 1, 300 random crops per row, one core of a MacBook Pro's Apple Silicon processor (14 cores, Linux, AArch64), GCC 15.2 `-O2 -mcpu=native`, file in the page cache, run on 2026-11-16. Sizes are deterministic. Latencies vary by up to about 10% between runs, so compare them within one table rather than across runs. The crop and full-level decode times in the two latency tables are from a later run the same day, after the decoder started reusing one zstd context per thread; the other figures moved by less than 10% in that run and were kept. All times in this document are on that MacBook Pro.
+All numbers come from `prmdbench`: the aerial test JPEG converted to gray and center-cropped to 4096², 5 levels, lossless, zstd at the default level 1, 300 random crops per row (100 for RGB), seed 1, file in the page cache (work directory on tmpfs, as the default `/tmp` is here). All times in this document are on one machine:
+
+| | |
+|---|---|
+| machine | MacBook Pro, Apple Silicon (14 cores), Linux VM, AArch64 |
+| compiler | GCC 15.2, Release `-O2 -mcpu=native` |
+| code | branch `threading`, commit 7b0db91 |
+| date | 2026-11-16 |
+
+Each configuration was run twice, once with a single encoder thread and once with the default automatic thread count (14 threads on this machine for every 4096² encode, 4 for JPEG2000 with 256² tiles). Decoding is single-threaded in both, so only the encode columns differ:
+
+```sh
+# gray (every mode, entropy table, lossy table)
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --threads 1
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy           # auto
+# RGB
+build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
+                --codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,haar+range,haar+zstd19 \
+                --lossy --out build/bench/results_rgb.md [--threads 1]
+# encode scaling (crop latencies of these runs are not used)
+build/prmdbench test_image.jpg --size 4096 --iters 20 --color gray|rgb --no-entropy-table \
+                --codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,j2k-t1024,haar+zstd19,haar+range \
+                --scaling 1,2,4,8,14,0
+```
+
+Encode columns read *1 thread / auto*. Decode tables are from the `--threads 1` runs; the automatic-thread runs gave the same decode times within run-to-run noise (full-level decodes within 6%, crop means mostly within 5%), as expected, since the decoder is unchanged by threading. Sizes are deterministic and identical at every thread count. Latencies vary by up to about 10% between runs, so compare them within one table rather than across runs; on this VM an occasional process also runs `naive` decode 10–25% slower throughout ([pipeline_durations.md](pipeline_durations.md#how-it-was-measured)).
+
+Compared with the previous tables (main branch), single-thread encodes are faster because of fixes made with the multithreaded encoder (row-major `cdf53` vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion), and `cdf53` also decodes faster, since its inverse uses the same row-major lifting (full L0 270 → 97 ms). Every other decode figure is unchanged within noise.
 
 ## File size
 
@@ -25,43 +52,42 @@ A crop also decodes the blocks of the coarser levels it's built from. *Tiles* co
 
 | crop | level | haar mean / p95 | tiles · bytes | naive mean / p95 | tiles · bytes | J2K mean / p95 | tiles · bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 256² | L0 | 0.59 / 0.68 ms | 9.5 · 154 KiB | 0.55 / 0.58 ms | 4 · 101 KiB | 13.5 / 15.2 ms | 4 · 191 KiB |
-| 256² | L1 | 0.55 / 0.63 ms | 8.2 · 143 KiB | 0.53 / 0.56 ms | 4 · 103 KiB | 12.4 / 13.3 ms | 9 · 433 KiB |
-| 256² | L2 | 0.53 / 0.66 ms | 6.8 · 129 KiB | 0.53 / 0.58 ms | 4 · 99 KiB | 8.8 / 9.3 ms | 25 · 1.2 MiB |
-| 256² | L3 | 0.53 / 0.57 ms | 5.0 · 119 KiB | 0.52 / 0.54 ms | 4 · 99 KiB | 7.7 / 8.6 ms | 81 · 3.8 MiB |
-| 256² | L4 (whole level) | 0.25 / 0.28 ms | 1.0 · 44 KiB | 0.25 / 0.27 ms | 1 · 44 KiB | 6.4 / 6.8 ms | 256 · 10.8 MiB |
-| 512² | L0 | 1.74 / 2.04 ms | 17.4 · 362 KiB | 1.67 / 1.89 ms | 9 · 282 KiB | 37.5 / 44.4 ms | 9 · 429 KiB |
-| 512² | L1 | 1.72 / 2.05 ms | 15.7 · 346 KiB | 1.67 / 1.96 ms | 9 · 286 KiB | 35.9 / 38.5 ms | 25 · 1.2 MiB |
-| 512² | L2 | 1.64 / 1.91 ms | 14.0 · 331 KiB | 1.61 / 1.78 ms | 9 · 276 KiB | 30.1 / 32.4 ms | 81 · 3.8 MiB |
-| 512² | L3 (whole level) | 1.17 / 1.36 ms | 5.0 · 179 KiB | 1.06 / 1.13 ms | 4 · 176 KiB | 26.1 / 29.4 ms | 256 · 10.8 MiB |
+| 256² | L0 | 0.56 / 0.65 ms | 9.5 · 154 KiB | 0.57 / 0.70 ms | 4 · 101 KiB | 13.5 / 15.3 ms | 4 · 191 KiB |
+| 256² | L1 | 0.52 / 0.59 ms | 8.2 · 143 KiB | 0.55 / 0.68 ms | 4 · 103 KiB | 12.4 / 13.6 ms | 9 · 433 KiB |
+| 256² | L2 | 0.50 / 0.62 ms | 6.8 · 129 KiB | 0.49 / 0.52 ms | 4 · 99 KiB | 8.9 / 9.9 ms | 25 · 1.2 MiB |
+| 256² | L3 | 0.50 / 0.53 ms | 5.0 · 119 KiB | 0.50 / 0.56 ms | 4 · 99 KiB | 7.5 / 7.9 ms | 81 · 3.8 MiB |
+| 256² | L4 (whole level) | 0.24 / 0.27 ms | 1.0 · 44 KiB | 0.23 / 0.24 ms | 1 · 44 KiB | 6.5 / 7.1 ms | 256 · 10.8 MiB |
+| 512² | L0 | 1.64 / 1.96 ms | 17.4 · 362 KiB | 1.53 / 1.85 ms | 9 · 282 KiB | 35.3 / 40.1 ms | 9 · 429 KiB |
+| 512² | L1 | 1.53 / 1.66 ms | 15.7 · 346 KiB | 1.45 / 1.53 ms | 9 · 286 KiB | 34.3 / 36.5 ms | 25 · 1.2 MiB |
+| 512² | L2 | 1.52 / 1.55 ms | 14.0 · 331 KiB | 1.44 / 1.64 ms | 9 · 276 KiB | 28.5 / 30.3 ms | 81 · 3.8 MiB |
+| 512² | L3 (whole level) | 1.08 / 1.10 ms | 5.0 · 179 KiB | 0.96 / 1.08 ms | 4 · 176 KiB | 24.1 / 25.7 ms | 256 · 10.8 MiB |
 
-A `haar` crop decodes about 2× `naive`'s blocks and reads up to 1.5× its bytes (1.0–1.5× across the rows above), in exchange for a 23% smaller file. At 256² it is within 10% of `naive`'s speed, and at 512² `naive` is 2–10% faster (5–7% on the Pi 5), so the two are roughly equal. `haar`'s detail blocks need only a few adds and shifts per pixel, while `naive`'s pixel blocks run the MED predictor, which goes pixel by pixel. Decoding the whole of L0 and then cropping would cost 93 ms, about **160×** a crop. On a 1000-step random walk, a 64 MiB block cache brings a `haar` crop down to 0.19 ms.
+A `haar` crop decodes about 2× `naive`'s blocks and reads up to 1.5× its bytes (1.0–1.5× across the rows above), in exchange for a 23% smaller file. At 256² it is within 6% of `naive`'s speed, and at 512² `naive` is 5–11% faster, so the two are roughly equal. `haar`'s detail blocks need only a few adds and shifts per pixel, while `naive`'s pixel blocks run the MED predictor, which goes pixel by pixel. Decoding the whole of L0 and then cropping would cost 82 ms, about **145×** a crop. On a 1000-step random walk, a 64 MiB block cache brings a `haar` crop down to 0.19 ms.
 
 ## Encode and decode time per mode
 
-Encode covers building and writing the whole 5-level pyramid of the 4096² image. Decode is a random crop at L0, or the whole of L0 or L1 at once.
+Encode covers building and writing the whole 5-level pyramid of the 4096² image, with one thread and with the automatic count (14 threads here). Decode is a random crop at L0, or the whole of L0 or L1 at once, always on one thread.
 
-| mode | encode | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
+| mode | encode: 1 thread / auto | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
 |---|---:|---:|---:|---:|---:|
-| `haar` | 85 ms | 0.59 / 0.68 ms | 1.74 / 2.04 ms | 93 ms | 22.0 ms |
-| `cdf53` | 332 ms | 0.79 / 0.90 ms | 2.53 / 2.81 ms | 270 ms | 47.1 ms |
-| `laplacian-box` | 218 ms¹ | 0.80 / 0.90 ms | 2.28 / 2.57 ms | 116 ms | 26.8 ms |
-| `laplacian-gauss` | 250 ms¹ | 0.75 / 0.85 ms | 2.09 / 2.25 ms | 109 ms | 23.5 ms |
-| `naive` | 104 ms | 0.55 / 0.58 ms | 1.67 / 1.89 ms | 79 ms | 18.9 ms |
-| `naive --no-med --no-ycocg`² | 96 ms | 0.37 / 0.46 ms | 1.07 / 1.26 ms | 55.5 ms | 13.3 ms |
-| JPEG2000, 256² tiles | 1453 ms | 13.5 / 15.2 ms | 37.5 / 44.4 ms | 1341 ms | 361 ms |
+| `haar` | 72 / 20 ms | 0.56 / 0.65 ms | 1.64 / 1.96 ms | 82 ms | 21.0 ms |
+| `cdf53` | 88 / 26 ms | 0.66 / 0.77 ms | 1.84 / 1.97 ms | 97 ms | 21.9 ms |
+| `laplacian-box` | 129 / 31 ms | 0.77 / 0.89 ms | 2.31 / 2.52 ms | 118 ms | 27.7 ms |
+| `laplacian-gauss` | 178 / 36 ms | 0.75 / 0.84 ms | 2.21 / 2.45 ms | 112 ms | 26.1 ms |
+| `naive` | 92 / 21 ms | 0.57 / 0.70 ms | 1.53 / 1.85 ms | 73 ms | 17.1 ms |
+| `naive --no-med --no-ycocg`² | 88 / 22 ms | 0.35 / 0.43 ms | 1.01 / 1.20 ms | 52.9 ms | 12.8 ms |
+| JPEG2000, 256² tiles | 1380 / 638 ms | 13.5 / 15.3 ms | 35.3 / 40.1 ms | 1359 ms | 364 ms |
+| JPEG2000, 1024² tiles | 1379 / 241 ms | 16.2 / 20.5 ms | 39.2 / 45.6 ms | 1318 ms | 355 ms |
 
-¹ Measured after the encoder stopped computing the `laplacian` residuals twice; before, 282 ms and 299 ms. Files are byte-identical.
+Without MED, `naive` crops decode about 1.6× faster (0.35 ms against 0.56 ms for plain `naive` in the same run) for a 23% larger file, and they are then faster than `haar`'s, whose file is 37% smaller.
 
-Without MED, `naive` crops decode about 1.5× faster (0.37 ms against 0.57 ms for plain `naive` in the same run) for a 23% larger file, and they are then faster than `haar`'s, whose file is 37% smaller.
-
-At zstd level 1, most of the encode time is the transform, so `haar` and `naive` encode 3–4× faster than `cdf53` and 2–3× faster than `laplacian`. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3–1.5× slower.
+With one thread, `haar`, `cdf53` and `naive` encode within 1.3× of each other, and `laplacian` takes 1.8–2.5× `haar`'s time (before the single-thread fixes, `cdf53` took 4× `haar`'s). With the automatic thread count every `.prmd` mode encodes the 4096² image in 20–36 ms, 3.4–4.9× faster than with one thread. JPEG2000 encodes 19× slower than `haar` on one thread and 12–32× slower with threads (OpenJPEG uses at most 4 threads with 256² tiles). `cdf53` crops are 1.1–1.2× slower than `haar`'s and its full-level decode 1.2×.
 
 ## Encode scaling (multithreaded encoder)
 
-`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`; the default is automatic). Run on 2026-11-16 on the same MacBook Pro (14 cores). *auto* is the default `threads = 0`, with the count it chose.
+`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. *auto* is the default `threads = 0`, with the count it chose.
 
-**Full image** (`test_image.jpg`, 8824 × 5336, 5 levels), `prmd encode` wall time in ms, median of 3 (1 for zstd 19). *base* is the encoder before threading (fc0a629); its N = 1 column differs from it only through single-thread fixes in the same change (row-major Cdf53 vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion).
+**Full image** (`test_image.jpg`, 8824 × 5336, 5 levels), `prmd encode` wall time in ms, median of 3 (1 for zstd 19), from an earlier run on this branch the same day (the 4096² tables below were rerun at 7b0db91 and agree with it). *base* is the encoder before threading (fc0a629); its N = 1 column differs from it only through single-thread fixes in the same change (row-major Cdf53 vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion).
 
 | config | base | N=1 | N=2 | N=4 | N=8 | N=14 | auto (used) | auto vs base |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -77,38 +103,40 @@ At zstd level 1, most of the encode time is the transform, so `haar` and `naive`
 | j2k gray (256² tiles) | 4022.7 | 4029.0 | 2458.0 | 1742.5 | 1767.8 | 1729.6 | 1725.2 (4) | 2.3× |
 | j2k rgb (1024² tiles) | 8475.9 | 8480.6 | 4662.5 | 2615.4 | 1775.8 | 1731.9 | 1744.4 (14) | 4.9× |
 
-**4096² centre crop** (`prmdbench --scaling 1,2,4,8,0`, encode_file wall time, median of 3). *best vs N=1*: the N=1 time over the fastest column's. *identical*: the file is the same at every count.
+**4096² centre crop** (`prmdbench --scaling 1,2,4,8,14,0`, command under [Setup](#setup); `encode_file` wall time, median of 3, 1 above 3 s). *best vs N=1*: the N=1 time over the fastest column's. *identical*: the file is the same at every count.
 
 Gray:
 
-| codec | N=1 | N=2 | N=4 | N=8 | auto | best vs N=1 | identical |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| haar | 71 ms | 39 ms | 24 ms | 18 ms | 18 ms (14 used) | 3.99× (auto) | yes |
-| cdf53 | 93 ms | 54 ms | 33 ms | 24 ms | 26 ms (14 used) | 3.95× (N=8) | yes |
-| laplacian-box | 134 ms | 75 ms | 44 ms | 29 ms | 28 ms (14 used) | 4.73× (auto) | yes |
-| laplacian-gauss | 181 ms | 98 ms | 57 ms | 36 ms | 34 ms (14 used) | 5.26× (auto) | yes |
-| naive | 95 ms | 52 ms | 30 ms | 21 ms | 19 ms (14 used) | 5.12× (auto) | yes |
-| j2k-t256 | 1472 ms | 877 ms | 623 ms | 609 ms (4 used) | 630 ms (4 used) | 2.42× (N=8) | yes |
-| j2k-t1024 | 1477 ms | 794 ms | 429 ms | 272 ms | 240 ms (14 used) | 6.16× (auto) | yes |
-| haar+zstd19 | 1202 ms | 627 ms | 324 ms | 178 ms | 146 ms (14 used) | 8.21× (auto) | yes |
-| haar+range | 507 ms | 261 ms | 141 ms | 77 ms | 58 ms (14 used) | 8.73× (auto) | yes |
+| codec | N=1 | N=2 | N=4 | N=8 | N=14 | auto | best vs N=1 | identical |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| haar | 70 ms | 40 ms | 24 ms | 18 ms | 17 ms | 17 ms (14 used) | 4.13× (N=14) | yes |
+| cdf53 | 92 ms | 53 ms | 32 ms | 23 ms | 25 ms | 24 ms (14 used) | 3.98× (N=8) | yes |
+| laplacian-box | 139 ms | 74 ms | 43 ms | 29 ms | 28 ms | 28 ms (14 used) | 5.06× (N=14) | yes |
+| laplacian-gauss | 181 ms | 98 ms | 56 ms | 35 ms | 36 ms | 36 ms (14 used) | 5.18× (N=8) | yes |
+| naive | 96 ms | 52 ms | 30 ms | 21 ms | 20 ms | 19 ms (14 used) | 5.18× (auto) | yes |
+| j2k-t256 | 1476 ms | 878 ms | 616 ms | 614 ms (4 used) | 630 ms (4 used) | 630 ms (4 used) | 2.40× (N=8) | yes |
+| j2k-t1024 | 1483 ms | 792 ms | 427 ms | 272 ms | 245 ms | 247 ms (14 used) | 6.06× (N=14) | yes |
+| haar+zstd19 | 1218 ms | 626 ms | 326 ms | 177 ms | 138 ms | 134 ms (14 used) | 9.10× (auto) | yes |
+| haar+range | 515 ms | 262 ms | 140 ms | 77 ms | 57 ms | 58 ms (14 used) | 9.00× (N=14) | yes |
 
 RGB:
 
-| codec | N=1 | N=2 | N=4 | N=8 | auto | best vs N=1 | identical |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| haar | 256 ms | 136 ms | 76 ms | 46 ms | 40 ms (14 used) | 6.45× (auto) | yes |
-| cdf53 | 313 ms | 177 ms | 98 ms | 61 ms | 57 ms (14 used) | 5.52× (auto) | yes |
-| laplacian-box | 506 ms | 272 ms | 148 ms | 86 ms | 76 ms (14 used) | 6.67× (auto) | yes |
-| laplacian-gauss | 655 ms | 348 ms | 187 ms | 106 ms | 93 ms (14 used) | 7.07× (auto) | yes |
-| naive | 356 ms | 190 ms | 103 ms | 60 ms | 49 ms (14 used) | 7.21× (auto) | yes |
-| j2k-t256 | 3022 ms | 1905 ms | 1419 ms | 1417 ms (4 used) | 1420 ms (4 used) | 2.13× (N=8) | yes |
-| j2k-t1024 | 2995 ms | 1648 ms | 913 ms | 597 ms | 566 ms (14 used) | 5.29× (auto) | yes |
-| haar+zstd19 | 9033 ms | 4624 ms | 2401 ms | 1294 ms | 946 ms (14 used) | 9.54× (auto) | yes |
-| haar+range | 1120 ms | 578 ms | 308 ms | 171 ms | 130 ms (14 used) | 8.64× (auto) | yes |
+| codec | N=1 | N=2 | N=4 | N=8 | N=14 | auto | best vs N=1 | identical |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| haar | 256 ms | 139 ms | 78 ms | 48 ms | 44 ms | 44 ms (14 used) | 5.86× (N=14) | yes |
+| cdf53 | 319 ms | 180 ms | 104 ms | 68 ms | 66 ms | 64 ms (14 used) | 4.95× (auto) | yes |
+| laplacian-box | 513 ms | 277 ms | 152 ms | 91 ms | 80 ms | 81 ms (14 used) | 6.40× (N=14) | yes |
+| laplacian-gauss | 654 ms | 350 ms | 194 ms | 111 ms | 98 ms | 98 ms (14 used) | 6.68× (auto) | yes |
+| naive | 357 ms | 190 ms | 104 ms | 61 ms | 50 ms | 49 ms (14 used) | 7.22× (auto) | yes |
+| j2k-t256 | 3025 ms | 1904 ms | 1432 ms | 1451 ms (4 used) | 1452 ms (4 used) | 1415 ms (4 used) | 2.14× (auto) | yes |
+| j2k-t1024 | 3003 ms | 1647 ms | 910 ms | 604 ms | 574 ms | 573 ms (14 used) | 5.24× (auto) | yes |
+| haar+zstd19 | 9068 ms | 4650 ms | 2411 ms | 1289 ms | 924 ms | 925 ms (14 used) | 9.81× (N=14) | yes |
+| haar+range | 1116 ms | 582 ms | 304 ms | 164 ms | 124 ms | 121 ms (14 used) | 9.20× (auto) | yes |
 
-- Block coding scales almost linearly with the slow coders (range, zstd 19: 8–9× at 14 threads); with zstd 1 the whole encode reaches 4–7×, limited by memory bandwidth in the transforms and by what stays serial (allocating level planes, writing the file).
-- Beyond 8 threads the zstd-1 encodes gain little on this machine (its cores are not all equal), and `cdf53` RGB gets slightly slower.
+The N=1 column matches the `--threads 1` encode columns elsewhere in this document within 8% (separate runs), and *auto* matches N=14: the automatic count picks every hardware thread for a 4096² image. Differences of a few percent between N=8, N=14 and auto are run-to-run noise.
+
+- Block coding scales almost linearly with the slow coders (range, zstd 19: 9–10× at 14 threads); with zstd 1 the whole encode reaches 4–7×, limited by memory bandwidth in the transforms and by what stays serial (allocating level planes, writing the file).
+- Beyond 8 threads the zstd-1 encodes gain little on this machine (its cores are not all equal), and gray `cdf53` and `laplacian-gauss` get slightly slower (within noise).
 - JPEG2000 with 256² tiles uses at most 4 threads: OpenJPEG codes one tile at a time, and more threads made it slower. 1024² tiles scale to 5–6×. Its output is identical at every thread count too.
 - Peak memory (`/usr/bin/time`, full image) fell with the same change and does not grow with threads: `haar` RGB 2.21 → 1.43 GB, `laplacian` RGB q4 3.91 → 1.68 GB, `haar` gray 0.87 → 0.57 GB (the same at `--threads 1`, 14 and automatic).
 
@@ -177,9 +205,9 @@ The previous default was up to 13× slower than one thread on small images (a 12
 
 ## Entropy coder and zstd level
 
-**Coder.** zstd: 11.58 MiB at 0.62 ms per 256² crop. Range coder: 11.13 MiB at 7.6 ms. zstd is the default ([design.md §7.1](design.md)).
+**Coder.** zstd: 11.58 MiB at 0.59 ms per 256² crop. Range coder: 11.13 MiB at 7.4 ms. zstd is the default ([design.md §7.1](design.md)).
 
-**zstd level.** Level 1 is the default. Level 19 encodes 4–34× slower (gray `haar`: 1.24 s instead of 85 ms; RGB `haar`: 9.2 s instead of 0.30 s) and decodes at the same speed. It makes gray lossless files no smaller, but RGB files 2.7–4.1% smaller and lossy files 3–12% smaller (the lossy figure is from an earlier run; the benchmark has no lossy zstd-19 row). Pass `--entropy-level 19` when size matters more than encode time ([design.md §7.2](design.md)).
+**zstd level.** Level 1 is the default. Level 19 decodes at the same speed but encodes 13–17× slower on gray and 28–36× slower on RGB with one thread (gray `haar`: 1.22 s instead of 70 ms; RGB `haar`: 9.1 s instead of 0.26 s), and 6–10× / 15–21× slower with the automatic thread count (gray `haar` 134 vs 17 ms, RGB `haar` 0.93 s vs 44 ms), since its block coding scales better than the zstd-1 encode. These are from the scaling run above and a run with `--codecs haar,haar+zstd19,cdf53,cdf53+zstd19,naive,naive+zstd19 --scaling 1,0`. It makes gray lossless files no smaller, but RGB files 2.7–4.1% smaller and lossy files 3–12% smaller (the lossy figure is from an earlier run; the benchmark has no lossy zstd-19 row). Pass `--entropy-level 19` when size matters more than encode time ([design.md §7.2](design.md)).
 
 ## Level definition
 
@@ -191,32 +219,32 @@ The previous default was up to 13× slower than one thread on small images (a 12
 
 | codec | setting | bits/px | PSNR L0 | max err | 256² at L0 |
 |---|---|---:|---:|---:|---:|
-| haar | Q = 4 | 3.66 | 38.6 dB | 12 | 0.69 ms |
-| cdf53 | Q = 4 | 3.53 | 41.9 dB | 11 | 0.87 ms |
-| laplacian-gauss | Q = 4 | 4.72 | 46.4 dB | **2** (±Q/2, guaranteed) | 0.89 ms |
-| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 9.1 ms |
+| haar | Q = 4 | 3.66 | 38.6 dB | 12 | 0.68 ms |
+| cdf53 | Q = 4 | 3.53 | 41.9 dB | 11 | 0.71 ms |
+| laplacian-gauss | Q = 4 | 4.72 | 46.4 dB | **2** (±Q/2, guaranteed) | 0.91 ms |
+| JPEG2000 9/7 | 45 dB target | 3.14 | 44.7 dB | 10 | 8.7 ms |
 
 `haar` and `cdf53` quantize open loop, so errors pile up toward level 0. `laplacian` is closed loop and keeps every level within ±Q/2, at the cost of a larger file. JPEG2000 wins rate–distortion: 44.7 dB at 3.14 bits/px, where `cdf53` needs 3.53 bits/px for 41.9 dB. It gets there through rate-distortion-optimised truncation and the smoother 9/7 filter. `.prmd` decodes 10–13× faster.
 
 ## RGB
 
-Same image and setup, converted to RGB8 (raw L0 48.00 MiB, raw pyramid 63.94 MiB), 100 crops per row, from one `prmdbench` run (command in the README; full report in `build/bench/results_rgb.md`). RGB stays bit-exact through the reversible YCoCg-R transform; every block holds all three channels, so a crop needs no extra reads.
+Same image and setup, converted to RGB8 (raw L0 48.00 MiB, raw pyramid 63.94 MiB), 100 crops per row, from the RGB runs under [Setup](#setup) (full report in `build/bench/results_rgb.md`). RGB stays bit-exact through the reversible YCoCg-R transform; every block holds all three channels, so a crop needs no extra reads.
 
 ### File size
 
-| codec | file size | bits/px | vs raw L0 | vs raw pyramid | vs naive | encode |
+| codec | file size | bits/px | vs raw L0 | vs raw pyramid | vs naive | encode: 1 thread / auto |
 |---|---:|---:|---:|---:|---:|---:|
-| **haar** | 23.91 MiB | 11.96 | 2.01× smaller | 2.67× smaller | **−22.5%** | 328 ms |
-| cdf53 | 24.91 MiB | 12.46 | 1.93× smaller | 2.57× smaller | −19.2% | 988 ms |
-| laplacian-box | 31.96 MiB | 15.98 | 1.50× smaller | 2.00× smaller | +3.6% | 751 ms |
-| laplacian-gauss | 32.38 MiB | 16.19 | 1.48× smaller | 1.98× smaller | +5.0% | 824 ms |
-| naive (same coder) | 30.84 MiB | 15.42 | 1.56× smaller | 2.07× smaller | 0 | 351 ms |
-| naive, `--no-med --no-ycocg`³ | 57.83 MiB | 28.92 | 1.20× larger | 1.11× smaller | +87.5% | 274 ms |
-| haar, zstd 19 | 22.92 MiB | 11.46 | 2.09× smaller | 2.79× smaller | −25.7% | 8855 ms |
-| haar, range coder | **20.52 MiB** | 10.26 | 2.34× smaller | 3.12× smaller | −33.5% | 1092 ms |
-| JPEG2000, 256² tiles | 20.98 MiB | 10.49 | 2.29× smaller | 3.05× smaller | −32.0% | 2883 ms |
+| **haar** | 23.91 MiB | 11.96 | 2.01× smaller | 2.67× smaller | **−22.5%** | 288 / 64 ms |
+| cdf53 | 24.91 MiB | 12.46 | 1.93× smaller | 2.57× smaller | −19.2% | 331 / 73 ms |
+| laplacian-box | 31.96 MiB | 15.98 | 1.50× smaller | 2.00× smaller | +3.6% | 507 / 90 ms |
+| laplacian-gauss | 32.38 MiB | 16.19 | 1.48× smaller | 1.98× smaller | +5.0% | 647 / 97 ms |
+| naive (same coder) | 30.84 MiB | 15.42 | 1.56× smaller | 2.07× smaller | 0 | 350 / 50 ms |
+| naive, `--no-med --no-ycocg`³ | 57.83 MiB | 28.92 | 1.20× larger | 1.11× smaller | +87.5% | 261 / 62 ms |
+| haar, zstd 19 | 22.92 MiB | 11.46 | 2.09× smaller | 2.79× smaller | −25.7% | 9063 / 929 ms |
+| haar, range coder | **20.52 MiB** | 10.26 | 2.34× smaller | 3.12× smaller | −33.5% | 1129 / 117 ms |
+| JPEG2000, 256² tiles | 20.98 MiB | 10.49 | 2.29× smaller | 3.05× smaller | −32.0% | 2910 / 1472 ms |
 
-³ From a separate `prmdbench` run on the same machine (2026-11-16, `--codecs naive,naive-no-med,naive-no-ycocg,naive-no-med-no-ycocg`), whose plain `naive` matched the figures here within 6%. Base blocks store raw R, G and B values, with neither MED nor YCoCg-R.
+³ From a separate `prmdbench` run on the same machine (2026-11-16, `--codecs naive,naive-no-med,naive-no-ycocg,naive-no-med-no-ycocg`), whose plain `naive` matched the figures here within 2%. Base blocks store raw R, G and B values, with neither MED nor YCoCg-R.
 
 Unlike gray, `cdf53` is larger than `haar` on RGB, and both `laplacian` variants are larger than `naive`: presumably their ~1.33× residual samples cost more than the cross-level prediction saves on the chroma planes (not investigated). On RGB, zstd files are 12–17% larger than with the range coder (12% at level 19, 17% at level 1), so JPEG2000 is smaller than the default `.prmd` RGB file; `haar+range` is still the smallest.
 
@@ -226,33 +254,33 @@ Unlike gray, `cdf53` is larger than `haar` on RGB, and both `laplacian` variants
 
 | crop | level | haar mean / p95 | tiles · bytes | naive mean / p95 | tiles · bytes | J2K mean / p95 | tiles · bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 256² | L0 | 1.89 / 2.14 ms | 9.6 · 339 KiB | 1.79 / 1.88 ms | 4 · 196 KiB | 28.2 / 33.3 ms | 4 · 353 KiB |
-| 256² | L2 | 1.55 / 1.87 ms | 6.7 · 330 KiB | 1.72 / 1.89 ms | 4 · 249 KiB | 22.2 / 23.7 ms | 25 · 2.1 MiB |
-| 256² | L4 (whole level) | 0.79 / 0.92 ms | 1.0 · 113 KiB | 0.79 / 0.84 ms | 1 · 113 KiB | 18.1 / 19.4 ms | 256 · 21.0 MiB |
-| 512² | L0 | 5.49 / 5.86 ms | 17.4 · 784 KiB | 5.23 / 5.47 ms | 9 · 557 KiB | 71.2 / 81.7 ms | 9 · 801 KiB |
-| 512² | L3 (whole level) | 3.48 / 3.81 ms | 5.0 · 460 KiB | 3.24 / 3.38 ms | 4 · 451 KiB | 61.9 / 63.4 ms | 256 · 21.0 MiB |
+| 256² | L0 | 1.89 / 2.14 ms | 9.6 · 339 KiB | 1.85 / 1.95 ms | 4 · 196 KiB | 28.0 / 33.9 ms | 4 · 353 KiB |
+| 256² | L2 | 1.57 / 1.93 ms | 6.7 · 330 KiB | 1.76 / 1.84 ms | 4 · 249 KiB | 21.9 / 23.5 ms | 25 · 2.1 MiB |
+| 256² | L4 (whole level) | 0.83 / 0.87 ms | 1.0 · 113 KiB | 0.83 / 0.89 ms | 1 · 113 KiB | 17.3 / 20.1 ms | 256 · 21.0 MiB |
+| 512² | L0 | 5.52 / 5.82 ms | 17.4 · 784 KiB | 5.15 / 5.37 ms | 9 · 557 KiB | 72.4 / 83.6 ms | 9 · 801 KiB |
+| 512² | L3 (whole level) | 3.38 / 3.44 ms | 5.0 · 460 KiB | 3.25 / 3.38 ms | 4 · 451 KiB | 61.5 / 63.5 ms | 256 · 21.0 MiB |
 
-An RGB crop costs about 3× a gray one (three planes plus the YCoCg-R inverse). `.prmd` stays 13–23× faster than JPEG2000, and at coarse levels JPEG2000 again reads the whole file.
+An RGB crop costs about 3–3.5× a gray one (three planes plus the YCoCg-R inverse). `.prmd` stays 13–21× faster than JPEG2000, and at coarse levels JPEG2000 again reads the whole file.
 
 ### Encode and decode time per mode
 
-| mode | encode | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
+| mode | encode: 1 thread / auto | 256² crop at L0: mean / p95 | 512² crop at L0: mean / p95 | full L0 | full L1 |
 |---|---:|---:|---:|---:|---:|
-| `haar` | 328 ms | 1.89 / 2.14 ms | 5.49 / 5.86 ms | 263 ms | 60.3 ms |
-| `cdf53` | 988 ms | 2.47 / 2.77 ms | 8.01 / 8.75 ms | 768 ms | 134 ms |
-| `laplacian-box` | 751 ms | 2.66 / 3.02 ms | 7.66 / 8.05 ms | 355 ms | 85.2 ms |
-| `laplacian-gauss` | 824 ms | 2.61 / 3.12 ms | 7.18 / 7.61 ms | 316 ms | 75.8 ms |
-| `naive` | 351 ms | 1.79 / 1.88 ms | 5.23 / 5.47 ms | 242 ms | 58.4 ms |
-| `naive --no-med --no-ycocg`³ | 274 ms | 1.09 / 1.29 ms | 3.14 / 3.65 ms | 169 ms | 44.2 ms |
-| `haar`, zstd 19 | 8855 ms | 2.21 / 2.61 ms | 5.73 / 6.07 ms | 262 ms | 63.5 ms |
-| `haar`, range coder | 1092 ms | 16.2 / 21.2 ms | 37.5 / 42.8 ms | 1248 ms | 351 ms |
-| JPEG2000, 256² tiles | 2883 ms | 28.2 / 33.3 ms | 71.2 / 81.7 ms | 2659 ms | 796 ms |
+| `haar` | 288 / 64 ms | 1.89 / 2.14 ms | 5.52 / 5.82 ms | 255 ms | 59.9 ms |
+| `cdf53` | 331 / 73 ms | 2.13 / 2.41 ms | 6.27 / 6.72 ms | 311 ms | 68.8 ms |
+| `laplacian-box` | 507 / 90 ms | 2.77 / 3.07 ms | 7.80 / 8.36 ms | 374 ms | 87.5 ms |
+| `laplacian-gauss` | 647 / 97 ms | 2.71 / 3.04 ms | 7.43 / 7.78 ms | 359 ms | 83.4 ms |
+| `naive` | 350 / 50 ms | 1.85 / 1.95 ms | 5.15 / 5.37 ms | 238 ms | 59.5 ms |
+| `naive --no-med --no-ycocg`³ | 261 / 62 ms | 1.06 / 1.22 ms | 3.12 / 3.64 ms | 161 ms | 39.2 ms |
+| `haar`, zstd 19 | 9063 / 929 ms | 2.29 / 2.67 ms | 5.94 / 6.89 ms | 262 ms | 62.0 ms |
+| `haar`, range coder | 1129 / 117 ms | 16.6 / 20.8 ms | 39.0 / 44.5 ms | 1275 ms | 354 ms |
+| JPEG2000, 256² tiles | 2910 / 1472 ms | 28.0 / 33.9 ms | 72.4 / 83.6 ms | 2641 ms | 808 ms |
 
-Without MED and YCoCg-R, RGB `naive` crops decode about 1.7× faster (1.09 against 1.86 ms in the same run), and the file nearly doubles (+87.5%), ending up larger than raw L0.
+Without MED and YCoCg-R, RGB `naive` crops decode about 1.7× faster (1.06 against 1.82 ms in the same run), and the file nearly doubles (+87.5%), ending up larger than raw L0.
 
-zstd 19 saves 4.1% on `haar` for a 27× slower encode. Full-level decode is the same speed; its 256² crops were 17% slower in this run (2.21 vs 1.89 ms), which the gray runs did not show. The range coder is 8.6× slower per 256² crop.
+With the automatic thread count the RGB `.prmd` encodes take 50–97 ms, 4.5–7× faster than with one thread; the slow coders gain most (range 9.6×, zstd 19 9.8×), JPEG2000 with 256² tiles only 2× (at most 4 threads). zstd 19 saves 4.1% on `haar` for a 31× slower encode with one thread, 15× with threads. Full-level decode is the same speed; its 256² crops were 21% slower in the single-thread run (2.29 vs 1.89 ms) and 5% slower in the automatic-thread run, so this is mostly noise. The range coder is 8.8× slower per 256² crop.
 
-**Block cache.** On a 1000-step random walk of 256² crops at L0, a 64 MiB cache brings `haar` from 1.95 to 0.55 ms, `naive` from 1.79 to 0.16 ms and `haar+range` from 15.6 to 0.67 ms.
+**Block cache.** On a 1000-step random walk of 256² crops at L0, a 64 MiB cache brings `haar` from 1.98 to 0.55 ms, `naive` from 1.80 to 0.16 ms and `haar+range` from 16.0 to 0.67 ms.
 
 ### Lossy
 
@@ -260,14 +288,14 @@ zstd 19 saves 4.1% on `haar` for a 27× slower encode. Full-level decode is the 
 
 | codec | setting | file size | bits/px | PSNR L0 | max err | 256² at L0 |
 |---|---|---:|---:|---:|---:|---:|
-| haar | Q = 4 | 13.29 MiB | 6.64 | 37.7 dB | 16 | 2.25 ms |
-| haar | Q = 8 | 8.95 MiB | 4.47 | 34.4 dB | 28 | 2.15 ms |
-| cdf53 | Q = 4 | 13.42 MiB | 6.71 | 40.6 dB | 15 | 2.77 ms |
-| cdf53 | Q = 8 | 8.91 MiB | 4.45 | 36.3 dB | 23 | 2.68 ms |
-| cdf53, range coder | Q = 4 | 10.46 MiB | 5.23 | 40.6 dB | 15 | 12.2 ms |
+| haar | Q = 4 | 13.29 MiB | 6.64 | 37.7 dB | 16 | 2.27 ms |
+| haar | Q = 8 | 8.95 MiB | 4.47 | 34.4 dB | 28 | 2.18 ms |
+| cdf53 | Q = 4 | 13.42 MiB | 6.71 | 40.6 dB | 15 | 2.53 ms |
+| cdf53 | Q = 8 | 8.91 MiB | 4.45 | 36.3 dB | 23 | 2.42 ms |
+| cdf53, range coder | Q = 4 | 10.46 MiB | 5.23 | 40.6 dB | 15 | 12.3 ms |
 | laplacian-gauss | Q = 4 | 20.74 MiB | 10.37 | 44.4 dB | 4 | 3.09 ms |
-| laplacian-gauss | Q = 8 | 14.47 MiB | 7.23 | 39.5 dB | 8 | 3.02 ms |
-| JPEG2000 9/7 | 45 dB target | 9.02 MiB | 4.51 | 44.3 dB | 15 | 14.1 ms |
-| JPEG2000 9/7 | 40 dB target | 6.32 MiB | 3.16 | 39.7 dB | 30 | 10.2 ms |
+| laplacian-gauss | Q = 8 | 14.47 MiB | 7.23 | 39.5 dB | 8 | 3.00 ms |
+| JPEG2000 9/7 | 45 dB target | 9.02 MiB | 4.51 | 44.3 dB | 15 | 14.4 ms |
+| JPEG2000 9/7 | 40 dB target | 6.32 MiB | 3.16 | 39.7 dB | 30 | 10.5 ms |
 
-JPEG2000's rate–distortion lead is larger on RGB than on gray: at about 40 dB it needs 3.16 bits/px against 6.71 for `cdf53`. `laplacian`'s ±Q/2 guarantee holds on Y/Co/Cg, not per RGB channel, so its RGB max error reaches Q (4 at Q = 4). At similar PSNR, `.prmd` lossy crops decode about 4× faster than JPEG2000's (`cdf53` Q = 4 vs the 40 dB target: 2.77 vs 10.2 ms; `laplacian-gauss` Q = 4 vs 45 dB: 3.09 vs 14.1 ms).
+JPEG2000's rate–distortion lead is larger on RGB than on gray: at about 40 dB it needs 3.16 bits/px against 6.71 for `cdf53`. `laplacian`'s ±Q/2 guarantee holds on Y/Co/Cg, not per RGB channel, so its RGB max error reaches Q (4 at Q = 4). At similar PSNR, `.prmd` lossy crops decode about 4× faster than JPEG2000's (`cdf53` Q = 4 vs the 40 dB target: 2.53 vs 10.5 ms; `laplacian-gauss` Q = 4 vs 45 dB: 3.09 vs 14.4 ms).
