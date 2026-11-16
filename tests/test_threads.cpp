@@ -18,6 +18,7 @@
 #include <climits>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -848,6 +849,99 @@ TEST(ThreadsErrors, ParallelCodingStopsEarly) {
   const FailingCoder coder(fails_all, false);
   failing_encode(c, coder, 4);
   EXPECT_LT(coder.calls(), blocks / 2);
+}
+
+namespace {
+
+#if defined(__SANITIZE_THREAD__)
+constexpr bool kThreadSanitizer = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool kThreadSanitizer = true;
+#else
+constexpr bool kThreadSanitizer = false;
+#endif
+#else
+constexpr bool kThreadSanitizer = false;
+#endif
+
+// Threads of this process (Linux: entries of /proc/self/task), 0 if unknown.
+int process_threads() {
+  std::error_code ec;
+  int n = 0;
+  for (std::filesystem::directory_iterator it("/proc/self/task", ec), end;
+       !ec && it != end; it.increment(ec)) {
+    ++n;
+  }
+  return ec ? 0 : n;
+}
+
+// zstd coder that records which threads coded blocks, and the process's
+// thread count while it runs.
+class ThreadRecordingCoder final : public internal::BlockCoder {
+ public:
+  ThreadRecordingCoder() : inner_(internal::make_block_coder(Entropy::Zstd)) {}
+  Entropy id() const override { return Entropy::Zstd; }
+  void encode(const internal::BlockPlanes& in,
+              std::vector<uint8_t>& out) const override {
+    {
+      const std::lock_guard<std::mutex> lock(m_);
+      ids_.insert(std::this_thread::get_id());
+      max_threads_ = std::max(max_threads_, process_threads());
+    }
+    inner_->encode(in, out);
+  }
+  void decode(const uint8_t* d,
+              size_t n,
+              internal::BlockPlanes& io) const override {
+    inner_->decode(d, n, io);
+  }
+  std::set<std::thread::id> ids() const {
+    const std::lock_guard<std::mutex> lock(m_);
+    return ids_;
+  }
+  int max_threads() const {
+    const std::lock_guard<std::mutex> lock(m_);
+    return max_threads_;
+  }
+
+ private:
+  std::unique_ptr<internal::BlockCoder> inner_;
+  mutable std::mutex m_;
+  mutable std::set<std::thread::id> ids_;
+  mutable int max_threads_ = 0;
+};
+
+}  // namespace
+
+TEST(ThreadsSerial, OneThreadStartsNoThreadAndMatchesTheGoldenFile) {
+  const Case c = case_named("haar_1000x777_rgb");
+  EncodeOptions o = c.opts;
+  o.threads = 1;
+  const std::string path = testutil::temp_path("serial.prmd").string();
+  const ThreadRecordingCoder serial;
+  const int before = process_threads();
+  const EncodeReport r = internal::encode_prmd(source_of(c), path, o, &serial);
+  EXPECT_EQ(r.threads, 1);
+  EXPECT_EQ(file_hash(path), golden().at(c.name));
+  // Every block on the calling thread.
+  EXPECT_EQ(serial.ids(),
+            std::set<std::thread::id>{std::this_thread::get_id()});
+
+  // The same with 4 threads: same file, at most 4 coding threads.
+  o.threads = 4;
+  const ThreadRecordingCoder mt;
+  EXPECT_EQ(internal::encode_prmd(source_of(c), path, o, &mt).threads, 4);
+  EXPECT_EQ(file_hash(path), golden().at(c.name));
+  EXPECT_LE(mt.ids().size(), 4u);
+  if (before > 0 && !kThreadSanitizer) {
+    // The process thread count while blocks were coded: the serial encode
+    // added none, the 4-thread one exactly 3 workers, joined at the end.
+    // (TSan starts a helper thread with the first thread created.)
+    EXPECT_EQ(serial.max_threads(), before);
+    EXPECT_EQ(mt.max_threads(), before + 3);
+    EXPECT_EQ(process_threads(), before);
+  }
 }
 
 // ----------------------------------------------------------------------------

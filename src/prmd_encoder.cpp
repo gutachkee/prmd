@@ -284,7 +284,7 @@ std::vector<Planes> stored_planes(Decomposition& pyr,
 
   for (int level = num_levels - 1; level >= 0; --level) {
     if (geom[size_t(level)].base) {
-      PRMD_TIMED("copy_base");
+      PRMD_TIMED("move_base");
       stored[size_t(level)] = std::move(pyr.levels[size_t(level)]);
       color_forward(stored[size_t(level)], 0, channels, opts.ycocg, pool);
     }
