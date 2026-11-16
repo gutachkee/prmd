@@ -214,9 +214,9 @@ class Cdf53Transform final : public WaveletTransform {
     // c.w wide and ph tall.
     std::vector<int32_t> lo_rows(cw * size_t(ph));
     std::vector<int32_t> hi_rows(cw * size_t(ph));
-    std::vector<int32_t> line(size_t(std::max(pw, ph)));
-    std::vector<int32_t> s(size_t(std::max(c.w, c.h)));
-    std::vector<int32_t> d(size_t(std::max(c.w, c.h)));
+    std::vector<int32_t> line(static_cast<size_t>(pw));
+    std::vector<int32_t> s(cw);
+    std::vector<int32_t> d(cw);
 
     for (int y = 0; y < ph; ++y) {
       for (int x = 0; x < pw; ++x) {
@@ -229,17 +229,30 @@ class Cdf53Transform final : public WaveletTransform {
       }
     }
 
-    // Vertical pass over each column of `rows` → `lo` and `hi` planes.
+    // Vertical pass: fwd53() down every column of `rows` → `lo` and `hi`
+    // planes, evaluated row by row over all columns at once (row-major, one
+    // sequential stream per input row instead of one cache miss per sample).
+    // Same integer formulas as fwd53() with n = ph, m = c.h: first every d
+    // (high) row, then every s (low) row, which needs d rows j-1 and j.
     auto vertical = [&](const std::vector<int32_t>& rows, Region& lo,
                         Region& hi) {
-      for (int k = 0; k < c.w; ++k) {
-        for (int y = 0; y < ph; ++y) {
-          line[size_t(y)] = rows[size_t(y) * cw + size_t(k)];
+      auto in = [&](int y) { return rows.data() + size_t(y) * cw; };
+      for (int j = 0; j < c.h; ++j) {
+        const int32_t* x0 = in(2 * j);
+        const int32_t* x1 = in(2 * j + 1);
+        const int32_t* x2 = in(2 * j + 2 < ph ? 2 * j + 2 : ph - 2);
+        int32_t* hi_row = hi.row(j);
+        for (size_t k = 0; k < cw; ++k) {
+          hi_row[k] = x1[k] - ((x0[k] + x2[k]) >> 1);
         }
-        fwd53(line.data(), ph, s.data(), d.data());
-        for (int j = 0; j < c.h; ++j) {
-          lo.at(k, j) = s[size_t(j)];
-          hi.at(k, j) = d[size_t(j)];
+      }
+      for (int j = 0; j < c.h; ++j) {
+        const int32_t* x0 = in(2 * j);
+        const int32_t* dl = hi.row(j > 0 ? j - 1 : 0);
+        const int32_t* dj = hi.row(j);
+        int32_t* lo_row = lo.row(j);
+        for (size_t k = 0; k < cw; ++k) {
+          lo_row[k] = x0[k] + ((dl[k] + dj[k] + 2) >> 2);
         }
       }
     };
@@ -266,20 +279,46 @@ class Cdf53Transform final : public WaveletTransform {
     const Dims c = half_up(fine);
     const Rect K = coarse_support(r, fine);
 
-    // Vertical inverse per coefficient column → l (from LL, LH) and h (from
-    // HL, HH) over rows r.y .. r.bottom().
+    // Vertical inverse → l (from LL, LH) and h (from HL, HH) over rows
+    // r.y .. r.bottom(), columns K. This is inv53_range() down every column,
+    // evaluated row by row over all columns at once (row-major) with the same
+    // integer formulas: even fine row 2j is S(j) - ((D(j-1) + D(j) + 2) >> 2),
+    // odd row 2j+1 is D(j) + ((even(j) + even(j+1)) >> 1), even(j+1) falling
+    // back to even(j) on the last coefficient row.
     Region l(Rect{K.x, r.y, K.w, r.h});
     Region h(Rect{K.x, r.y, K.w, r.h});
-    for (int k = K.x; k < K.right(); ++k) {
-      inv53_range(
-          c.h, r.y, r.bottom(), [&](int j) { return coarse.at(k, j); },
-          [&](int j) { return bands[0].at(k, j); },
-          [&](int y, int32_t v) { l.at(k, y) = v; });
-      inv53_range(
-          c.h, r.y, r.bottom(), [&](int j) { return bands[1].at(k, j); },
-          [&](int j) { return bands[2].at(k, j); },
-          [&](int y, int32_t v) { h.at(k, y) = v; });
-    }
+    const size_t kw = size_t(K.w);
+    auto vertical = [&](const Region& S, const Region& D, Region& dst) {
+      auto srow = [&](int j) { return S.row(j) + (K.x - S.rect.x); };
+      auto drow = [&](int j) { return D.row(j) + (K.x - D.rect.x); };
+      for (int y = r.y; y < r.bottom(); ++y) {
+        const int j = y >> 1;
+        int32_t* o = dst.row(y);
+        const int32_t* s0 = srow(j);
+        const int32_t* dm = drow(j > 0 ? j - 1 : 0);
+        const int32_t* d0 = drow(j);
+        if ((y & 1) == 0) {
+          for (size_t i = 0; i < kw; ++i) {
+            o[i] = s0[i] - ((dm[i] + d0[i] + 2) >> 2);
+          }
+        } else if (j + 1 < c.h) {
+          const int32_t* s1 = srow(j + 1);
+          const int32_t* d1 = drow(j + 1);
+          for (size_t i = 0; i < kw; ++i) {
+            const int32_t e0 = s0[i] - ((dm[i] + d0[i] + 2) >> 2);
+            const int32_t e1 = s1[i] - ((d0[i] + d1[i] + 2) >> 2);
+            o[i] = d0[i] + ((e0 + e1) >> 1);
+          }
+        } else {
+          for (size_t i = 0; i < kw; ++i) {
+            const int32_t e0 = s0[i] - ((dm[i] + d0[i] + 2) >> 2);
+            o[i] = d0[i] + ((e0 + e0) >> 1);
+          }
+        }
+      }
+    };
+    vertical(coarse, bands[0], l);
+    vertical(bands[1], bands[2], h);
 
     // Horizontal inverse per row.
     out = Region(r);
