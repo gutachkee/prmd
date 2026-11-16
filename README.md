@@ -59,6 +59,7 @@ binary. To compile them in, use a separate build directory:
 cmake -B build-profile -DCMAKE_BUILD_TYPE=Release -DPRMD_PROFILE=ON && cmake --build build-profile -j
 build-profile/prmdpipeline test_image.jpg --runs 5 --threads 1     # per-step breakdown, serial
 build/prmdpipeline test_image.jpg --runs 5 --threads 1            # totals without timers
+build/prmdpipeline test_image.jpg --runs 5                        # totals, automatic threads
 ```
 
 `prmdpipeline` encodes once and decodes one 256² crop per level (overview, then zooming in) plus
@@ -98,7 +99,7 @@ build/prmd info img.prmd
 | `--levels` | 1–16 | 5 |
 | `--tile`, `--cblk` | tile (reporting unit) and code-block (decode unit) size | 256, 128 |
 | `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~12× slower decode; ~10× on a Pi 5), `raw` | `zstd` — see [design.md §7.1](docs/design.md) |
-| `--entropy-level` | zstd level 1–22. 19 encodes 4–34× slower (mode-dependent); it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller ([design.md §7.2](docs/design.md)) | 1 |
+| `--entropy-level` | zstd level 1–22. 19 encodes 13–36× slower on one thread and 6–21× with the default threads (mode-dependent); it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller ([design.md §7.2](docs/design.md)) | 1 |
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
 | `--no-med` | store base-block pixels as they are, without MED prediction (the coarsest level; every level for `naive`). Faster crops, larger file: gray `naive` +23%, crops about 1.5× faster ([benchmarks.md](docs/benchmarks.md)) | MED on |
 | `--no-ycocg` | store R, G, B as they are, without YCoCg-R (`rgb` only; ignored for gray) | YCoCg-R on |
@@ -135,16 +136,19 @@ single-threaded; a decoder must not be shared between threads.
 ## Benchmark
 
 ```sh
-build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy --threads 1
+build/prmdbench test_image.jpg --size 4096 --levels 5 --iters 300 --lossy
 build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-table \
                 --codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,haar+range,haar+zstd19 \
-                --lossy --out build/bench/results_rgb.md --threads 1
+                --lossy --out build/bench/results_rgb.md
 ```
 
-Encodes choose their thread count automatically unless `--threads N` is given; the commands
-above pass `--threads 1` so the encode column stays comparable with the published single-core
-tables. `--scaling 1,2,4,8,0` adds an encode-scaling table (time per thread count, the best
-speedup over `N=1`, and a check that every count writes the same file).
+Encodes choose their thread count automatically unless `--threads N` is given. The published
+tables ran each command twice, as above (automatic) and with `--threads 1` (serial), and show
+both encode times; decoding is single-threaded either way. `--scaling 1,2,4,8,0` adds an
+encode-scaling table (time per thread count, the best speedup over `N=1`, and a check that
+every count writes the same file). On the benchmark machine (14 Apple Silicon cores) a 4096² gray `haar` encode takes
+72 ms on one thread and 20 ms with the automatic count; on a Raspberry Pi 5 (4 cores),
+see [`docs/benchmarks-pi5.md`](docs/benchmarks-pi5.md).
 
 It reports file sizes (vs raw and vs naive), mean/p50/p95 latency for random 256² and 512² crops
 at every level, tiles touched, blocks decoded and bytes read per crop, an entropy-coder comparison

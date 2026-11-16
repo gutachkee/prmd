@@ -257,8 +257,8 @@ EncodeReport encode_file(const Image& src, const std::string& out_path,
   and large ones on every core; the result is a pure function of (image size, options,
   hardware thread count), so the same input always gets the same count. Embedders that already
   encode several images in parallel should still pass `threads = 1`. The CLI has `--threads`
-  (§4.1); `prmdbench` and `prmdpipeline` default to 0 too; their published single-core numbers
-  were taken with `--threads 1`.
+  (§4.1); `prmdbench` and `prmdpipeline` default to 0 too. The published benchmark tables show
+  each encode both with `--threads 1` and with the default (§10).
 - *Count used.* An explicit `threads = N > 0` is an upper bound honoured as given: `.prmd` uses
   at most one thread per present code-block (an image with a single block runs serially) and at
   most 256. `EncodeReport::threads` says how many the encode used (after the automatic choice,
@@ -305,7 +305,12 @@ EncodeReport encode_file(const Image& src, const std::string& out_path,
   file it points to is replaced (a dangling link creates its target); a target that exists and
   is not a regular file (`/dev/null`, a FIFO) is written directly; a missing or unwritable
   directory is an `IoError` with nothing created. There is no `fsync` (there was none before):
-  the replacement is atomic for readers and for failed writes, not for a system crash.
+  the replacement is atomic for readers and for failed writes, not for a system crash. On ext4
+  (default `auto_da_alloc`), replacing an existing file makes the kernel write the new file's
+  data out at `rename()`, so overwriting a file is slower than writing a new one on slow storage
+  (Raspberry Pi 5, SD card: full-image encode 650 ms to a new file, 1050–1080 ms over an
+  existing one); the encoder before threading paid the same when its `fopen("wb")` truncated an
+  existing file (890 → 1300 ms there).
 - *J2K.* `threads` is passed to `opj_codec_set_threads` (not called for 1, as before). OpenJPEG's
   output is byte-identical for every thread count (tested on gray, RGB, lossless and lossy).
   OpenJPEG parallelizes the code-blocks of one tile at a time, so small tiles cannot use many
@@ -679,7 +684,7 @@ Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of range.
 prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096] [--color gray|rgb|both]
          [--codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,j2k-t1024]
          [--out <exe dir>/bench/results.md] [--workdir DIR] [--no-entropy-table] [--lossy]
-         [--threads 1] [--scaling 1,2,4,8,0]
+         [--threads 0] [--scaling 1,2,4,8,0]
 ```
 `--threads` is `EncodeOptions::threads` for every encode (default 0 = automatic; pass
 `--threads 1` for a single-core encode column comparable across reports). `--scaling` adds an "Encode scaling" table:
@@ -699,7 +704,7 @@ The input is converted to the requested color format(s) and center-cropped or ed
 prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
              [--color gray|rgb] [--quant Q] [--entropy zstd|range|raw] [--entropy-level N]
              [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] [--file pipeline.prmd] [--label text]
-             [--threads 1]
+             [--threads 0]
 ```
 Loads the image, encodes it once, then decodes a fixed navigation plan: one 256² crop per level
 from the coarsest down, then 4 pans/jumps at L0 (10 crops at `--levels 6`). Prints median wall
@@ -869,7 +874,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 
 **Evidence: crop decode.** No change. In the `prmdbench` entropy table, a 256² crop at L0 takes 0.60 ms for haar at both levels, 0.80 ms for cdf53 at both, and 0.59 vs 0.58 ms for naive. (One earlier, shorter comparison showed naive 10–20% slower at level 1; the full run did not reproduce it.)
 
-**Why.** For gray lossless the speed-up is free. For RGB and lossy files, the default trades 3–12% of size for 4–34× faster encoding (mode-dependent: about 4× for cdf53, 15× for haar, 31× for RGB haar), and anyone who wants the smaller file can still ask for it. Why level 19 helps RGB and lossy blocks but not gray lossless ones wasn't investigated; plausibly, quantized and chroma planes contain more long repeated runs that only level 19's search finds.
+**Why.** For gray lossless the speed-up is free. For RGB and lossy files, the default trades 3–12% of size for 4–34× faster encoding (mode-dependent: about 4× for cdf53, 15× for haar, 31× for RGB haar), and anyone who wants the smaller file can still ask for it. *Update (multithreaded encoder branch, 2026-11-16):* the single-thread `cdf53` fix (§2.2, row-major vertical lifting) made zstd 1 encodes faster, so on the 4096² benchmark level 19 is now 13–17× slower on gray and 28–36× on RGB with one thread, and 6–10× / 15–21× with the default automatic thread count ([benchmarks.md](benchmarks.md#entropy-coder-and-zstd-level)); the tables above are from before that change. Why level 19 helps RGB and lossy blocks but not gray lossless ones wasn't investigated; plausibly, quantized and chroma planes contain more long repeated runs that only level 19's search finds.
 
 **Costs accepted.**
 - RGB files about 4% larger (haar 23.91 vs 22.92 MiB). The range coder remains the smallest RGB option (20.52 MiB, 1.2 s encode), at 7–12× slower decode.
@@ -966,6 +971,7 @@ thread counts explicitly.
 - **Reference rows:** full-level decode of L0–L2 (what a crop costs without random access).
 - **Lossy** (`--lossy`): `.prmd` haar, cdf53 and laplacian-gauss at quant 2/4/8 with the default coder (plus cdf53+range at quant 4) against J2K 9/7 at PSNR targets 50/45/40/35 dB. Reports size, bits/px, PSNR at L0 vs the source, PSNR at L2 vs the codec's own lossless L2 (n/a for J2K, whose 9/7 levels differ from its 5/3 levels), max |error| at L0, and L0 crop latency.
 - **Level quality:** PSNR of each mode's levels against the `haar` 2×2-mean pyramid. One sample PNG of level 3 (centre 256²) is saved per *level definition* (`haar`, `box`, `gauss`, `cdf53`, and each J2K tiling) for visual aliasing comparison. Codecs that share a definition decode identical levels. J2K tilings count separately, because J2K transforms each tile with symmetric extension at tile borders.
+- **Threads:** decoding is single-threaded, so every latency figure is single-core. Encode times depend on `--threads` (default 0, automatic); the published reports run each command with `--threads 1` and with the default and show both encode times (*1 thread / auto*), plus an encode-scaling table (`--scaling`). The workdir should be on tmpfs or a fresh directory: on ext4, replacing an existing file (as a second run into the same `--workdir` does) makes the kernel flush its data at `rename()`, which on an SD card added about 0.4 s to a 32 MiB encode ([benchmarks-pi5.md](benchmarks-pi5.md)).
 - **Output:** markdown tables on stdout and in the `--out` path (default `<exe dir>/bench/results.md`: `bench/` in the directory of the `prmdbench` executable, resolved at run time, so `build/bench/results.md` for `build/prmdbench`), plus the build flags and CPU model. The level-3 samples go to `samples/` next to the report, so `build/bench/samples/` by default.
 
 ---

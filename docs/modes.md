@@ -34,10 +34,10 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 | `--tile` | `tile` | multiple of `cblk`, ≤ 32768 | 256 | tile size: the unit blocks are grouped by on disk and counted by in stats |
 | `--cblk` | `cblk` | even, 16–4096 | 128 | code-block size: the unit of decoding, I/O and caching |
 | `--entropy` | `entropy` | `zstd`, `range`, `raw` | `zstd` | coder for each block's numbers (below) |
-| `--entropy-level` | `entropy_level` | zstd: 1–22; others: 0 | 0 (= zstd 1) | zstd compression effort; decode speed is the same at every level. Level 19 encodes 4–34× slower (mode-dependent): it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller |
+| `--entropy-level` | `entropy_level` | zstd: 1–22; others: 0 | 0 (= zstd 1) | zstd compression effort; decode speed is the same at every level. Level 19 encodes 13–36× slower on one thread, 6–21× with the default threads (mode-dependent): it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller |
 | `--no-med` | `med = false` | flag | MED on | base blocks store pixel values without MED prediction: faster to decode, larger file |
 | `--no-ycocg` | `ycocg = false` | flag | YCoCg-R on | RGB stores R, G, B without YCoCg-R; ignored for gray |
-| `--threads` | `threads` | 0, 1, 2, … (≤ 256 used) | 0 | encoder threads: 0 = automatic (chosen per image from its size, up to one per hardware thread), 1 = serial, N = at most N. Changes only the encode time: the file is byte-identical for every value ([design.md §1.4](design.md)) |
+| `--threads` | `threads` | 0, 1, 2, … (≤ 256 used) | 0 | encoder threads: 0 = automatic (chosen per image from its size and the cost of the mode and coder, up to one per hardware thread; small images encode serially), 1 = serial, N = at most N. Changes only the encode time: the file is byte-identical for every value ([design.md §1.4](design.md)) |
 
 **Which options apply to which mode:**
 
@@ -50,8 +50,8 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 | `--quant` > 0 | open loop | open loop | closed loop | rejected |
 
 **Entropy coders** (gray, `haar`):
-- `zstd`: the default. 11.58 MiB, 0.62 ms per 256² crop.
-- `range`: a context-adaptive range coder. Files are 4–5% smaller (11.13 MiB), but decode is about 12× slower (7.6 ms).
+- `zstd`: the default. 11.58 MiB, 0.59 ms per 256² crop.
+- `range`: a context-adaptive range coder. Files are 4–5% smaller (11.13 MiB), but decode is about 12× slower (7.4 ms).
 - `raw`: uncompressed (32 MiB). Only useful for measuring transform cost.
 
 **Color.** With `rgb`, each channel gets the gray mode's filters independently. The stored values then go through the reversible YCoCg-R transform, so RGB stays bit-exact when lossless.
@@ -106,7 +106,7 @@ level 0 decodes to  [9, 13, 13, 17, 59, 63, 63, 67]     (exact: [10, 12, 14, 16,
 ```
 
 **Measured:**
-- Lossless: 11.58 MiB (−23.0% vs `naive`), 0.59 ms per 256² crop at L0.
+- Lossless: 11.58 MiB (−23.0% vs `naive`), 0.56 ms per 256² crop at L0.
 - Q = 4: 3.66 bits/px, 38.6 dB at L0, max error 12 (in 8-bit pixel values, 0–255).
 - Coarse levels alias a little, like any 2×2 mean.
 
@@ -143,7 +143,7 @@ stored  (d):  [0, −21, 0, 2]
 **Lossy:** the same rules as `haar`: open loop, LH/HL step Q, HH step 2Q, no per-pixel bound.
 
 **Measured:**
-- Lossless: 11.18 MiB (−25.7% vs `naive`), the smallest `.prmd` file. 0.79 ms per 256² crop at L0.
+- Lossless: 11.18 MiB (−25.7% vs `naive`), the smallest `.prmd` file. 0.66 ms per 256² crop at L0.
 - Q = 4: 3.53 bits/px, 41.9 dB, max error 11 (pixel values).
 - Its levels differ from the 2×2 mean by 24–28 dB PSNR, mostly a half-pixel shift.
 
@@ -202,7 +202,7 @@ The task's baseline. Every level is downsampled with `--down` (`box` or `gauss`,
 
 **Lossy:** not supported. `--quant` > 0 is rejected.
 
-**Measured:** 15.04 MiB, 0.55 ms per 256² crop at L0.
+**Measured:** 15.04 MiB, 0.57 ms per 256² crop at L0.
 
 ```sh
 build/prmd encode in.jpg out.prmd --mode naive
@@ -330,7 +330,7 @@ In this part, PSNR compares the decoded image with the source image. Here, a hig
 
 - JPEG2000 gives approximately 3 dB more than `cdf53` for the same file size.
 - For the same PSNR, it needs approximately 25% fewer bits.
-- But its crops decode 15–26 times more slowly than `.prmd` crops.
+- But its crops decode 15–27 times more slowly than `.prmd` crops.
 
 ### RGB images
 
@@ -346,7 +346,7 @@ In this part, PSNR compares the decoded image with the source image. Here, a hig
 | Coarse levels with less aliasing | `cdf53` or `gauss`, lossless | ∞ dB at each level, but a different filter (24–30 dB from `haar`) |
 | The smallest lossy file | `cdf53` with `--quant` | 2–4 dB better than `haar` for a slightly smaller file |
 | A guaranteed maximum error | `laplacian` with `--quant` | Error never more than Q/2, with the same PSNR at all levels |
-| The best quality for each bit, when crop speed is not important | JPEG2000 | Approximately 3 dB better than `cdf53`, but 15–26 times slower crops |
+| The best quality for each bit, when crop speed is not important | JPEG2000 | Approximately 3 dB better than `cdf53`, but 15–27 times slower crops |
 
 ## Not a mode: JPEG2000
 
@@ -354,4 +354,4 @@ In this part, PSNR compares the decoded image with the source image. Here, a hig
 - `--j2k-tile`: tile size, default 256.
 - `--j2k-lossy-psnr DB`: switches to the lossy 9/7 wavelet and aims for that PSNR.
 
-`--levels` and `--color` work as for `.prmd`, and the other options are ignored. JPEG2000 makes 6.4% smaller lossless files than `haar` (10.84 MiB), but crops are 15–26× slower, and coarse-level crops read most of the file. See [writeup.md](writeup.md).
+`--levels`, `--color` and `--threads` work as for `.prmd` (J2K uses at most one thread per 4 code-blocks of a tile, so 4 with 256² tiles), and the other options are ignored. JPEG2000 makes 6.4% smaller lossless files than `haar` (10.84 MiB), but crops are 15–27× slower, and coarse-level crops read most of the file. See [writeup.md](writeup.md).

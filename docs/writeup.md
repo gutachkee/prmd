@@ -1,8 +1,8 @@
 # Prmd: random-access crops from a single-file image pyramid
 
-`prmd` stores an image and its 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**. That's **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). On one core of a MacBook Pro (Apple Silicon), a random 256² crop decodes in **0.25–0.6 ms** at any level, and the whole pyramid encodes in **85 ms**.
+`prmd` stores an image and its 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**. That's **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). On one core of a MacBook Pro (Apple Silicon), a random 256² crop decodes in **0.24–0.56 ms** at any level. The whole pyramid encodes in **72 ms** on one core, or **20 ms** with the default automatic thread count (14 threads), into a byte-identical file.
 
-Build, CLI and API: [README](../README.md) (222 tests). Modes with worked examples: [modes.md](modes.md). Interfaces and design details: [design.md](design.md). Full benchmark tables (every mode, lossy, RGB): [benchmarks.md](benchmarks.md); Raspberry Pi 5: [benchmarks-pi5.md](benchmarks-pi5.md).
+Build, CLI and API: [README](../README.md) (874 tests). Modes with worked examples: [modes.md](modes.md). Interfaces and design details: [design.md](design.md). Full benchmark tables (every mode, lossy, RGB): [benchmarks.md](benchmarks.md); Raspberry Pi 5: [benchmarks-pi5.md](benchmarks-pi5.md).
 
 ## 1. Design
 
@@ -51,23 +51,23 @@ Mean / p95 latency and bytes read per crop (block data, not counting the index):
 
 | crop | level | haar | naive | JPEG2000 | bytes read: haar · naive · J2K |
 |---|---:|---:|---:|---:|---:|
-| 256² | L0 | 0.59 / 0.68 ms | 0.55 / 0.58 ms | 13.5 / 15.2 ms | 154 KiB · 101 KiB · 191 KiB |
-| 256² | L2 | 0.53 / 0.66 ms | 0.53 / 0.58 ms | 8.8 / 9.3 ms | 129 KiB · 99 KiB · 1.2 MiB |
-| 256² | L4 (whole level) | 0.25 / 0.28 ms | 0.25 / 0.27 ms | 6.4 / 6.8 ms | 44 KiB · 44 KiB · 10.8 MiB |
-| 512² | L0 | 1.74 / 2.04 ms | 1.67 / 1.89 ms | 37.5 / 44.4 ms | 362 KiB · 282 KiB · 429 KiB |
-| 512² | L3 (whole level) | 1.17 / 1.36 ms | 1.06 / 1.13 ms | 26.1 / 29.4 ms | 179 KiB · 176 KiB · 10.8 MiB |
+| 256² | L0 | 0.56 / 0.65 ms | 0.57 / 0.70 ms | 13.5 / 15.3 ms | 154 KiB · 101 KiB · 191 KiB |
+| 256² | L2 | 0.50 / 0.62 ms | 0.49 / 0.52 ms | 8.9 / 9.9 ms | 129 KiB · 99 KiB · 1.2 MiB |
+| 256² | L4 (whole level) | 0.24 / 0.27 ms | 0.23 / 0.24 ms | 6.5 / 7.1 ms | 44 KiB · 44 KiB · 10.8 MiB |
+| 512² | L0 | 1.64 / 1.96 ms | 1.53 / 1.85 ms | 35.3 / 40.1 ms | 362 KiB · 282 KiB · 429 KiB |
+| 512² | L3 (whole level) | 1.08 / 1.10 ms | 0.96 / 1.08 ms | 24.1 / 25.7 ms | 179 KiB · 176 KiB · 10.8 MiB |
 
-**Compression vs. access granularity.** A `haar` crop also decodes the coarser blocks it's built from: about 2× `naive`'s blocks and 1.0–1.5× its bytes, in exchange for a 23% smaller file. Crops are about as fast as `naive`'s (within 10%), because detail blocks need only adds and shifts while `naive`'s pixel blocks run the pixel-by-pixel MED predictor. Decoding all of L0 and then cropping costs 93 ms, about **160×** a crop. A 64 MiB block cache brings a crop on a random walk down to 0.19 ms.
+**Compression vs. access granularity.** A `haar` crop also decodes the coarser blocks it's built from: about 2× `naive`'s blocks and 1.0–1.5× its bytes, in exchange for a 23% smaller file. Crops are about as fast as `naive`'s (within 6% at 256², 5–11% slower at 512²), because detail blocks need only adds and shifts while `naive`'s pixel blocks run the pixel-by-pixel MED predictor. Decoding all of L0 and then cropping costs 82 ms, about **145×** a crop. A 64 MiB block cache brings a crop on a random walk down to 0.19 ms.
 
-**Decode speed vs. size.** zstd level 1 encodes 4–34× faster than level 19 and gives the same gray lossless size (RGB and lossy files are 3–12% larger). The range coder would save 4–5% at 12× the decode time; crop latency matters more than 4% of storage here.
+**Decode speed vs. size.** zstd level 1 encodes 13–36× faster than level 19 on one thread (6–21× with threads) and gives the same gray lossless size (RGB and lossy files are 3–12% larger). The range coder would save 4–5% at 12× the decode time; crop latency matters more than 4% of storage here.
 
-**Level definition.** `haar` levels are the exact 2×2 mean but alias; `cdf53` and `laplacian-gauss` are sharper or smoother and differ from the 2×2 mean by 24–30 dB PSNR. The matcher's needs should decide the mode. `cdf53` crops cost 1.3–1.5× `haar`'s.
+**Level definition.** `haar` levels are the exact 2×2 mean but alias; `cdf53` and `laplacian-gauss` are sharper or smoother and differ from the 2×2 mean by 24–30 dB PSNR. The matcher's needs should decide the mode. `cdf53` crops cost 1.1–1.2× `haar`'s.
 
 **PSNR.** Lossless files decode every level bit for bit (∞ dB). With `--quant`, `cdf53` is the best `.prmd` mode (41.9 dB at 3.53 bits/px for Q = 4, 2–4 dB above `haar`), `laplacian` is the only one with a guaranteed per-pixel bound (±Q/2), and JPEG2000 still wins rate–distortion by about 3 dB. The 24–30 dB between `cdf53`/`gauss` levels and the 2×2 mean measures a different filter, not lower quality. [modes.md](modes.md#modes-and-psnr) explains every mode in terms of PSNR.
 
-**Why not JPEG2000?** It's built in (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better and wins lossy rate–distortion (44.7 dB at 3.14 bits/px against 41.9 dB at 3.53 for `cdf53`), but crops decode **15–26× slower** and encoding is 17× slower. Its access granularity is poor at coarse levels: tiles are defined at full resolution and each holds all its resolutions, so in the benchmarked layout (256² tiles, one tile-part per tile, TLM) a 256² crop at L4 reads the **whole file** (10.8 MiB, against 44 KiB for `.prmd`). The format itself allows better: with tile-parts split by resolution, or one tile with precincts and packet-length markers (PLT), a decoder could fetch only the coarse resolutions. OpenJPEG 2.5.4 doesn't: in our measurements every such layout read as much or more, and untiled ones read the whole file for every crop ([design.md §8](design.md)). Getting coarse-level access out of JPEG2000 needs a different decoder (e.g. Kakadu or a JPIP-style packet fetcher).
+**Why not JPEG2000?** It's built in (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better and wins lossy rate–distortion (44.7 dB at 3.14 bits/px against 41.9 dB at 3.53 for `cdf53`), but crops decode **15–27× slower** and encoding is 19× slower on one thread (32× with threads: OpenJPEG uses at most 4 threads with 256² tiles). Its access granularity is poor at coarse levels: tiles are defined at full resolution and each holds all its resolutions, so in the benchmarked layout (256² tiles, one tile-part per tile, TLM) a 256² crop at L4 reads the **whole file** (10.8 MiB, against 44 KiB for `.prmd`). The format itself allows better: with tile-parts split by resolution, or one tile with precincts and packet-length markers (PLT), a decoder could fetch only the coarse resolutions. OpenJPEG 2.5.4 doesn't: in our measurements every such layout read as much or more, and untiled ones read the whole file for every crop ([design.md §8](design.md)). Getting coarse-level access out of JPEG2000 needs a different decoder (e.g. Kakadu or a JPIP-style packet fetcher).
 
-**Embedded ARM.** About 3 kLOC of plain C++17 plus zstd (2.8k without the JPEG2000 backend and the profiler), integer arithmetic only, no SIMD required, and a mature, fuzzed decoder library that ships in every embedded Linux distribution. Decode memory is O(crop area): a few int32 planes for the crop and its ancestors (a 512² crop peaks at about 8 MB RSS), not the whole level. On a Raspberry Pi 5 a 256² crop takes 0.6–1.4 ms, still 11–21× faster than JPEG2000.
+**Embedded ARM.** About 3 kLOC of plain C++17 plus zstd (2.8k without the JPEG2000 backend and the profiler), integer arithmetic only, no SIMD required, and a mature, fuzzed decoder library that ships in every embedded Linux distribution. Decode memory is O(crop area): a few int32 planes for the crop and its ancestors (a 512² crop peaks at about 8 MB RSS), not the whole level. On a Raspberry Pi 5 a 256² crop takes 0.7–1.4 ms, still 11–20× faster than JPEG2000, and the 4096² gray pyramid encodes in 0.22 s on one core or 0.1 s on all four.
 
 ## 4. Limitations
 
@@ -80,6 +80,6 @@ Mean / p95 latency and bytes read per crop (block data, not counting the index):
 ## 5. Next steps
 
 - An adaptive rANS coder or a per-file zstd dictionary, to recover the 4–17% at zstd speed.
-- Encode and decode the blocks of one level in parallel; blocks are independent.
+- Decode the blocks of one level in parallel, as the encoder already does; blocks are independent.
 - NEON versions of the transforms; `mmap` I/O.
 - Rate-distortion-weighted quantizer steps per level, to close the lossy gap to JPEG2000.
