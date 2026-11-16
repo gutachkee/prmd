@@ -59,58 +59,121 @@ At zstd level 1, most of the encode time is the transform, so `haar` and `naive`
 
 ## Encode scaling (multithreaded encoder)
 
-`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`; the default is all hardware threads). Run on 2026-11-16 on the same MacBook Pro (14 cores).
+`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`; the default is automatic). Run on 2026-11-16 on the same MacBook Pro (14 cores). *auto* is the default `threads = 0`, with the count it chose.
 
 **Full image** (`test_image.jpg`, 8824 × 5336, 5 levels), `prmd encode` wall time in ms, median of 3 (1 for zstd 19). *base* is the encoder before threading (fc0a629); its N = 1 column differs from it only through single-thread fixes in the same change (row-major Cdf53 vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion).
 
-| config | base | N=1 | N=2 | N=4 | N=8 | N=14 | speedup vs base |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| haar gray | 273.0 | 232.6 | 129.0 | 80.2 | 55.3 | 55.2 | 4.9× |
-| haar rgb | 821.5 | 763.3 | 423.0 | 248.1 | 169.8 | 159.4 | 5.2× |
-| cdf53 gray | 1219.8 | 289.5 | 167.7 | 101.5 | 75.1 | 78.7 | 15.5× |
-| cdf53 rgb q4 | 3740.2 | 1141.3 | 632.2 | 356.8 | 247.2 | 253.6 | 14.7× |
-| laplacian rgb q4 | 2498.3 | 1854.2 | 988.4 | 538.8 | 325.2 | 289.8 | 8.6× |
-| laplacian-gauss gray | 771.8 | 545.6 | 298.8 | 172.8 | 110.9 | 108.0 | 7.1× |
-| naive gray | 331.3 | 310.2 | 168.3 | 99.5 | 65.5 | 59.5 | 5.6× |
-| haar gray + range | 1461.7 | 1434.7 | 749.7 | 395.8 | 216.7 | 163.5 | 8.9× |
-| haar rgb + zstd 19 | 27523.3 | 27955.9 | 14758.8 | 7317.3 | 3946.5 | 2950.4 | 9.3× |
-| j2k gray (256² tiles) | 4107.6 | 4109.0 | 2515.4 | 1800.2 | 1820.5 | 1786.7 | 2.3× |
-| j2k rgb (1024² tiles) | 8612.2 | 8560.7 | 4813.8 | 2717.9 | 1812.2 | 1760.1 | 4.9× |
+| config | base | N=1 | N=2 | N=4 | N=8 | N=14 | auto (used) | auto vs base |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| haar gray | 276.4 | 234.2 | 135.4 | 78.7 | 62.9 | 56.9 | 55.1 (14) | 5.0× |
+| haar rgb | 824.5 | 759.8 | 424.8 | 246.8 | 165.2 | 166.7 | 162.4 (14) | 5.1× |
+| cdf53 gray | 1257.1 | 306.0 | 184.4 | 126.0 | 76.0 | 77.9 | 78.0 (14) | 16.1× |
+| cdf53 rgb q4 | 3803.3 | 1163.6 | 645.3 | 357.1 | 235.3 | 275.8 | 272.5 (14) | 14.0× |
+| laplacian rgb q4 | 2695.9 | 1885.4 | 983.2 | 535.1 | 319.7 | 280.0 | 281.1 (14) | 9.6× |
+| laplacian-gauss gray | 766.7 | 543.2 | 295.4 | 166.8 | 106.2 | 101.2 | 99.6 (14) | 7.7× |
+| naive gray | 329.8 | 308.8 | 164.5 | 95.3 | 63.2 | 57.5 | 59.5 (14) | 5.5× |
+| haar gray + range | 1486.8 | 1415.8 | 734.0 | 391.3 | 219.1 | 163.1 | 163.8 (14) | 9.1× |
+| haar rgb + zstd 19 | 26443.3 | 26355.3 | 13571.3 | 7036.5 | 3804.3 | 2778.9 | 2800.7 (14) | 9.4× |
+| j2k gray (256² tiles) | 4022.7 | 4029.0 | 2458.0 | 1742.5 | 1767.8 | 1729.6 | 1725.2 (4) | 2.3× |
+| j2k rgb (1024² tiles) | 8475.9 | 8480.6 | 4662.5 | 2615.4 | 1775.8 | 1731.9 | 1744.4 (14) | 4.9× |
 
-**4096² centre crop** (`prmdbench --scaling 1,2,4,8,0`, encode_file wall time, median of 3; *auto* = 14 threads). *identical*: the file is the same at every count.
+**4096² centre crop** (`prmdbench --scaling 1,2,4,8,0`, encode_file wall time, median of 3). *best vs N=1*: the N=1 time over the fastest column's. *identical*: the file is the same at every count.
 
 Gray:
 
-| codec | N=1 | N=2 | N=4 | N=8 | auto | speedup | identical |
+| codec | N=1 | N=2 | N=4 | N=8 | auto | best vs N=1 | identical |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| haar | 73 ms | 40 ms | 25 ms | 19 ms | 21 ms (14 used) | 3.52× | yes |
-| cdf53 | 93 ms | 55 ms | 35 ms | 29 ms | 34 ms (14 used) | 2.72× | yes |
-| laplacian-box | 135 ms | 76 ms | 47 ms | 34 ms | 36 ms (14 used) | 3.73× | yes |
-| laplacian-gauss | 186 ms | 101 ms | 59 ms | 42 ms | 44 ms (14 used) | 4.25× | yes |
-| naive | 99 ms | 53 ms | 33 ms | 23 ms | 22 ms (14 used) | 4.39× | yes |
-| j2k-t256 | 1483 ms | 907 ms | 631 ms | 655 ms (4 used) | 632 ms (4 used) | 2.35× | yes |
-| j2k-t1024 | 1501 ms | 799 ms | 436 ms | 272 ms | 245 ms (14 used) | 6.12× | yes |
-| haar+zstd19 | 1217 ms | 625 ms | 330 ms | 179 ms | 137 ms (14 used) | 8.88× | yes |
-| haar+range | 517 ms | 265 ms | 140 ms | 78 ms | 60 ms (14 used) | 8.69× | yes |
+| haar | 71 ms | 39 ms | 24 ms | 18 ms | 18 ms (14 used) | 3.99× (auto) | yes |
+| cdf53 | 93 ms | 54 ms | 33 ms | 24 ms | 26 ms (14 used) | 3.95× (N=8) | yes |
+| laplacian-box | 134 ms | 75 ms | 44 ms | 29 ms | 28 ms (14 used) | 4.73× (auto) | yes |
+| laplacian-gauss | 181 ms | 98 ms | 57 ms | 36 ms | 34 ms (14 used) | 5.26× (auto) | yes |
+| naive | 95 ms | 52 ms | 30 ms | 21 ms | 19 ms (14 used) | 5.12× (auto) | yes |
+| j2k-t256 | 1472 ms | 877 ms | 623 ms | 609 ms (4 used) | 630 ms (4 used) | 2.42× (N=8) | yes |
+| j2k-t1024 | 1477 ms | 794 ms | 429 ms | 272 ms | 240 ms (14 used) | 6.16× (auto) | yes |
+| haar+zstd19 | 1202 ms | 627 ms | 324 ms | 178 ms | 146 ms (14 used) | 8.21× (auto) | yes |
+| haar+range | 507 ms | 261 ms | 141 ms | 77 ms | 58 ms (14 used) | 8.73× (auto) | yes |
 
 RGB:
 
-| codec | N=1 | N=2 | N=4 | N=8 | auto | speedup | identical |
+| codec | N=1 | N=2 | N=4 | N=8 | auto | best vs N=1 | identical |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| haar | 261 ms | 142 ms | 83 ms | 57 ms | 60 ms (14 used) | 4.34× | yes |
-| cdf53 | 328 ms | 185 ms | 111 ms | 87 ms | 102 ms (14 used) | 3.22× | yes |
-| laplacian-box | 508 ms | 275 ms | 156 ms | 104 ms | 106 ms (14 used) | 4.80× | yes |
-| laplacian-gauss | 656 ms | 353 ms | 198 ms | 126 ms | 130 ms (14 used) | 5.06× | yes |
-| naive | 350 ms | 189 ms | 107 ms | 70 ms | 66 ms (14 used) | 5.30× | yes |
-| j2k-t256 | 3045 ms | 1931 ms | 1480 ms | 1475 ms (4 used) | 1440 ms (4 used) | 2.11× | yes |
-| j2k-t1024 | 3023 ms | 1665 ms | 929 ms | 601 ms | 572 ms (14 used) | 5.28× | yes |
-| haar+zstd19 | 9163 ms | 4687 ms | 2471 ms | 1321 ms | 977 ms (14 used) | 9.37× | yes |
-| haar+range | 1137 ms | 582 ms | 309 ms | 174 ms | 138 ms (14 used) | 8.21× | yes |
+| haar | 256 ms | 136 ms | 76 ms | 46 ms | 40 ms (14 used) | 6.45× (auto) | yes |
+| cdf53 | 313 ms | 177 ms | 98 ms | 61 ms | 57 ms (14 used) | 5.52× (auto) | yes |
+| laplacian-box | 506 ms | 272 ms | 148 ms | 86 ms | 76 ms (14 used) | 6.67× (auto) | yes |
+| laplacian-gauss | 655 ms | 348 ms | 187 ms | 106 ms | 93 ms (14 used) | 7.07× (auto) | yes |
+| naive | 356 ms | 190 ms | 103 ms | 60 ms | 49 ms (14 used) | 7.21× (auto) | yes |
+| j2k-t256 | 3022 ms | 1905 ms | 1419 ms | 1417 ms (4 used) | 1420 ms (4 used) | 2.13× (N=8) | yes |
+| j2k-t1024 | 2995 ms | 1648 ms | 913 ms | 597 ms | 566 ms (14 used) | 5.29× (auto) | yes |
+| haar+zstd19 | 9033 ms | 4624 ms | 2401 ms | 1294 ms | 946 ms (14 used) | 9.54× (auto) | yes |
+| haar+range | 1120 ms | 578 ms | 308 ms | 171 ms | 130 ms (14 used) | 8.64× (auto) | yes |
 
-- Block coding scales almost linearly with the slow coders (range, zstd 19: 8–9× at 14 threads); with zstd 1 the whole encode reaches 3.5–5×, limited by memory bandwidth in the transforms and by what stays serial (allocating level planes, writing the file: 12 ms of the 54 ms gray `haar` encode at 14 threads, [pipeline_durations.md](pipeline_durations.md)).
-- Beyond 8 threads the zstd-1 encodes gain nothing on this machine (its cores are not all equal), and `cdf53` gets slightly slower.
+- Block coding scales almost linearly with the slow coders (range, zstd 19: 8–9× at 14 threads); with zstd 1 the whole encode reaches 4–7×, limited by memory bandwidth in the transforms and by what stays serial (allocating level planes, writing the file).
+- Beyond 8 threads the zstd-1 encodes gain little on this machine (its cores are not all equal), and `cdf53` RGB gets slightly slower.
 - JPEG2000 with 256² tiles uses at most 4 threads: OpenJPEG codes one tile at a time, and more threads made it slower. 1024² tiles scale to 5–6×. Its output is identical at every thread count too.
-- Peak memory (`/usr/bin/time`, full image) fell with the same change and does not grow with threads: `haar` RGB 2.21 → 1.43 GB, `laplacian` RGB q4 3.91 → 1.68 GB, `haar` gray 0.87 → 0.57 GB.
+- Peak memory (`/usr/bin/time`, full image) fell with the same change and does not grow with threads: `haar` RGB 2.21 → 1.43 GB, `laplacian` RGB q4 3.91 → 1.68 GB, `haar` gray 0.87 → 0.57 GB (the same at `--threads 1`, 14 and automatic).
+
+### Automatic thread count
+
+`threads = 0` uses ⌊√(W / 32 Ki)⌋ threads for W work units (level-0 samples × channels × the mode/coder weight, design.md §1.4), at most one per hardware thread and per level-0 code-block. The rule was fitted to the table below: centre crops of `test_image.jpg` (5 levels) encoded at fixed counts 1, 2, 3, 4, 6, 8, 11, 14 through the library (`encode_file`, median of 3–41 runs, file on tmpfs). Each cell: *one-thread ms* · *fastest count* (*its speedup over one thread*) · *count the automatic rule picks*. (J2K: the counts asked for; it uses at most 4 with 256² tiles.)
+
+| size | gray haar | RGB haar | gray cdf53 | RGB laplacian | gray haar + range | RGB haar + zstd 19 | gray J2K (256² tiles) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 64² | 0.04 · 1 (1.0×) · 1 | 0.09 · 1 (1.0×) · 1 | 0.04 · 1 (1.0×) · 1 | 0.14 · 1 (1.0×) · 1 | 0.09 · 1 (1.0×) · 1 | 1.86 · 4 (1.2×) · 1 | 0.35 · 1 (1.0×) · 1 |
+| 128² | 0.09 · 1 (1.0×) · 1 | 0.26 · 1 (1.0×) · 1 | 0.11 · 1 (1.0×) · 1 | 0.52 · 1 (1.0×) · 1 | 0.50 · 1 (1.0×) · 1 | 8.79 · 2 (1.1×) · 1 | 1.75 · 1 (1.0×) · 1 |
+| 256² | 0.29 · 1 (1.0×) · 1 | 1.05 · 3 (1.1×) · 2 | 0.37 · 1 (1.0×) · 1 | 1.97 · 4 (1.2×) · 3 | 2.02 · 6 (1.7×) · 3 | 33.48 · 8 (3.2×) · 4 | 6.70 · 4 (1.4×) · 2 |
+| 384² | 0.62 · 3 (1.2×) · 2 | 2.37 · 6 (1.6×) · 4 | 0.80 · 4 (1.3×) · 2 | 4.59 · 6 (1.9×) · 5 | 4.58 · 6 (2.6×) · 5 | 69.58 · 14 (5.8×) · 9 | - |
+| 512² | 0.96 · 4 (1.3×) · 2 | 4.16 · 8 (2.0×) · 5 | 1.25 · 4 (1.6×) · 3 | 7.50 · 8 (2.5×) · 7 | 8.18 · 8 (3.6×) · 7 | 126.01 · 14 (6.8×) · 14 | 26.99 · 11 (1.8×) · 4 |
+| 768² | 2.17 · 6 (2.0×) · 4 | 8.93 · 8 (3.0×) · 8 | 2.74 · 6 (2.0×) · 4 | 17.41 · 8 (3.6×) · 10 | 18.54 · 11 (5.1×) · 10 | 281.99 · 14 (7.9×) · 14 | - |
+| 1024² | 4.08 · 6 (2.3×) · 5 | 15.89 · 8 (3.7×) · 10 | 5.15 · 6 (2.7×) · 6 | 29.95 · 8 (4.2×) · 14 | 33.52 · 14 (6.2×) · 14 | 521.88 · 14 (8.0×) · 14 | 102.97 · 14 (2.2×) · 4 |
+| 1536² | 10.18 · 8 (3.0×) · 8 | 36.59 · 11 (4.6×) · 14 | 12.48 · 8 (3.6×) · 9 | 70.22 · 11 (5.4×) · 14 | 72.95 · 14 (7.7×) · 14 | 1267.94 · 14 (8.8×) · 14 | - |
+| 2048² | 17.90 · 8 (3.3×) · 11 | 64.63 · 11 (5.2×) · 14 | 22.63 · 8 (3.9×) · 12 | 125.69 · 11 (5.4×) · 14 | 130.41 · 14 (7.6×) · 14 | 2261.12 · 14 (9.3×) · 14 | 378.90 · 11 (2.3×) · 4 |
+| 3072² | 41.65 · 8 (3.6×) · 14 | 147.94 · 11 (4.9×) · 14 | 54.60 · 11 (3.8×) · 14 | 286.00 · 14 (5.6×) · 14 | 291.97 · 14 (9.1×) · 14 | - | - |
+| 4096² | 73.25 · 11 (3.9×) · 14 | 259.34 · 11 (4.9×) · 14 | 96.84 · 11 (3.9×) · 14 | 504.01 · 11 (5.6×) · 14 | 516.57 · 14 (8.9×) · 14 | - | - |
+| full | 217.71 · 11 (4.3×) · 14 | 739.55 · 14 (5.2×) · 14 | 288.27 · 11 (4.3×) · 14 | 1423.36 · 14 (5.9×) · 14 | 1413.94 · 14 (8.7×) · 14 | - | - |
+
+Over these 15 configurations × 12 sizes (also gray/RGB cdf53, laplacian, naive, RGB range, q4) the automatic count is never more than 5% slower than one thread and on average 3.6% slower than the fastest fixed count (geometric mean; worst cases 1.2–1.3× slower than the fastest count at mid sizes, apart from one 14-thread outlier, RGB cdf53 at 3072², 1.6×, where 14 threads were slower than 11 in that run). A linear rule (one thread per fixed amount of work) either starts threads on images too small to gain or uses all 14 at 512², where 4–8 are fastest.
+
+**Before and after** (threads = 1 vs the default, the same crops; *before* is the previous default, all hardware threads, up to the block count; ms, median):
+
+| config | size | before: 1 | before: default (used) | after: 1 | after: auto (used) | best fixed (N) |
+|---|---|---:|---:|---:|---:|---:|
+| gray haar | 64² | 0.03 | 0.90 (5) | 0.04 | 0.05 (1) | 0.04 (1) |
+| gray haar | 128² | 0.08 | 1.44 (5) | 0.09 | 0.09 (1) | 0.09 (1) |
+| gray haar | 256² | 0.32 | 2.46 (8) | 0.27 | 0.27 (1) | 0.29 (1) |
+| gray haar | 512² | 1.16 | 3.99 (14) | 1.03 | 0.92 (2) | 0.77 (4) |
+| gray haar | 1024² | 4.29 | 4.86 (14) | 4.29 | 1.85 (5) | 1.79 (6) |
+| gray haar | 2048² | 17.97 | 7.30 (14) | 18.50 | 4.33 (11) | 5.41 (8) |
+| gray haar | 4096² | 75.68 | 20.63 (14) | 76.05 | 18.75 (14) | 18.56 (11) |
+| gray haar | full | 228.84 | 50.04 (14) | 226.11 | 50.00 (14) | 51.11 (11) |
+| RGB haar | 64² | 0.09 | 0.96 (5) | 0.10 | 0.09 (1) | 0.09 (1) |
+| RGB haar | 128² | 0.25 | 2.07 (5) | 0.26 | 0.25 (1) | 0.26 (1) |
+| RGB haar | 256² | 1.04 | 3.90 (8) | 0.98 | 1.02 (2) | 0.98 (3) |
+| RGB haar | 512² | 3.99 | 9.17 (14) | 3.93 | 1.92 (5) | 2.04 (8) |
+| RGB haar | 1024² | 15.82 | 13.92 (14) | 15.48 | 4.25 (10) | 4.27 (8) |
+| RGB haar | 2048² | 65.10 | 23.07 (14) | 65.71 | 12.80 (14) | 12.52 (11) |
+| RGB haar | 4096² | 261.68 | 63.99 (14) | 262.35 | 54.20 (14) | 53.16 (11) |
+| RGB haar | full | 747.37 | 151.64 (14) | 740.66 | 143.33 (14) | 140.87 (14) |
+| gray haar + range | 64² | 0.07 | 0.84 (5) | 0.09 | 0.08 (1) | 0.09 (1) |
+| gray haar + range | 128² | 0.54 | 1.54 (5) | 0.44 | 0.42 (1) | 0.50 (1) |
+| gray haar + range | 256² | 2.04 | 2.64 (8) | 1.96 | 1.34 (3) | 1.21 (6) |
+| gray haar + range | 512² | 8.48 | 4.62 (14) | 8.17 | 2.32 (7) | 2.25 (8) |
+| gray haar + range | 1024² | 32.96 | 7.96 (14) | 32.92 | 5.28 (14) | 5.43 (14) |
+| gray haar + range | 2048² | 129.93 | 18.01 (14) | 130.13 | 15.04 (14) | 17.14 (14) |
+| gray haar + range | 4096² | 515.55 | 61.85 (14) | 523.90 | 60.98 (14) | 58.27 (14) |
+| gray haar + range | full | 1425.69 | 158.11 (14) | 1426.71 | 161.74 (14) | 161.98 (14) |
+| RGB haar + zstd 19 | 64² | 1.76 | 2.17 (5) | 1.80 | 1.78 (1) | 1.57 (4) |
+| RGB haar + zstd 19 | 128² | 8.82 | 9.26 (5) | 8.78 | 8.85 (1) | 7.77 (2) |
+| RGB haar + zstd 19 | 256² | 33.16 | 13.56 (8) | 33.43 | 13.43 (4) | 10.56 (8) |
+| RGB haar + zstd 19 | 512² | 125.68 | 26.48 (14) | 125.71 | 18.95 (14) | 18.65 (14) |
+| RGB haar + zstd 19 | 1024² | 522.52 | 74.48 (14) | 521.86 | 64.34 (14) | 65.32 (14) |
+| gray J2K | 64² | 0.23 | 2.63 (4) | 0.33 | 0.33 (1) | 0.35 (1) |
+| gray J2K | 128² | 1.68 | 3.30 (4) | 1.57 | 1.84 (1) | 1.75 (1) |
+| gray J2K | 256² | 6.83 | 5.09 (4) | 6.71 | 5.65 (2) | 4.87 (4) |
+| gray J2K | 512² | 25.98 | 15.50 (4) | 26.59 | 14.78 (4) | 15.06 (11) |
+| gray J2K | 1024² | 98.96 | 44.29 (4) | 98.81 | 46.69 (4) | 47.37 (14) |
+| gray J2K | 2048² | 378.47 | 165.94 (4) | 378.60 | 160.28 (4) | 162.43 (11) |
+
+The previous default was up to 13× slower than one thread on small images (a 128² RGB encode: 2.07 ms instead of 0.25); the automatic count matches one thread there (no thread is started) and the fastest fixed count on large images. Part of the gain at mid sizes is the pool itself: a parallel run now wakes only the workers that join it, workers spin for 100 µs between stages, and loops of ≤ 32 Ki samples run inline (1024² RGB at 14 threads: 14.4 → 4.8 ms; an empty 14-thread run: 320 → 29 µs). Every output file is now written to a temporary file and renamed, which adds about 7 µs per encode (64² gray: 0.033 → 0.040 ms).
 
 ## Entropy coder and zstd level
 

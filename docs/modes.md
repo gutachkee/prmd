@@ -37,7 +37,7 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 | `--entropy-level` | `entropy_level` | zstd: 1–22; others: 0 | 0 (= zstd 1) | zstd compression effort; decode speed is the same at every level. Level 19 encodes 4–34× slower (mode-dependent): it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller |
 | `--no-med` | `med = false` | flag | MED on | base blocks store pixel values without MED prediction: faster to decode, larger file |
 | `--no-ycocg` | `ycocg = false` | flag | YCoCg-R on | RGB stores R, G, B without YCoCg-R; ignored for gray |
-| `--threads` | `threads` | 0, 1, 2, … (≤ 256 used) | 0 | encoder threads: 0 = one per hardware thread, 1 = serial. Changes only the encode time: the file is byte-identical for every value ([design.md §1.4](design.md)) |
+| `--threads` | `threads` | 0, 1, 2, … (≤ 256 used) | 0 | encoder threads: 0 = automatic (chosen per image from its size, up to one per hardware thread), 1 = serial, N = at most N. Changes only the encode time: the file is byte-identical for every value ([design.md §1.4](design.md)) |
 
 **Which options apply to which mode:**
 
