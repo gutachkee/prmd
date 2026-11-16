@@ -57,6 +57,61 @@ Without MED, `naive` crops decode about 1.5× faster (0.37 ms against 0.57 ms fo
 
 At zstd level 1, most of the encode time is the transform, so `haar` and `naive` encode 3–4× faster than `cdf53` and 2–3× faster than `laplacian`. `cdf53`'s full-level decode is 3× `haar`'s, while its crops are only about 1.3–1.5× slower.
 
+## Encode scaling (multithreaded encoder)
+
+`EncodeOptions::threads` / `--threads` (design.md §1.4). The `.prmd` file is byte-identical for every thread count; every row below was checked. The other tables in this document encode with one thread (`prmdbench --threads 1`, the default). Run on 2026-11-16 on the same MacBook Pro (14 cores).
+
+**Full image** (`test_image.jpg`, 8824 × 5336, 5 levels), `prmd encode` wall time in ms, median of 3 (1 for zstd 19). *base* is the encoder before threading (fc0a629); its N = 1 column differs from it only through single-thread fixes in the same change (row-major Cdf53 vertical lifting, one upsample per Laplacian level, no serial zero-fill, fused colour conversion).
+
+| config | base | N=1 | N=2 | N=4 | N=8 | N=14 | speedup vs base |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| haar gray | 273.0 | 232.6 | 129.0 | 80.2 | 55.3 | 55.2 | 4.9× |
+| haar rgb | 821.5 | 763.3 | 423.0 | 248.1 | 169.8 | 159.4 | 5.2× |
+| cdf53 gray | 1219.8 | 289.5 | 167.7 | 101.5 | 75.1 | 78.7 | 15.5× |
+| cdf53 rgb q4 | 3740.2 | 1141.3 | 632.2 | 356.8 | 247.2 | 253.6 | 14.7× |
+| laplacian rgb q4 | 2498.3 | 1854.2 | 988.4 | 538.8 | 325.2 | 289.8 | 8.6× |
+| laplacian-gauss gray | 771.8 | 545.6 | 298.8 | 172.8 | 110.9 | 108.0 | 7.1× |
+| naive gray | 331.3 | 310.2 | 168.3 | 99.5 | 65.5 | 59.5 | 5.6× |
+| haar gray + range | 1461.7 | 1434.7 | 749.7 | 395.8 | 216.7 | 163.5 | 8.9× |
+| haar rgb + zstd 19 | 27523.3 | 27955.9 | 14758.8 | 7317.3 | 3946.5 | 2950.4 | 9.3× |
+| j2k gray (256² tiles) | 4107.6 | 4109.0 | 2515.4 | 1800.2 | 1820.5 | 1786.7 | 2.3× |
+| j2k rgb (1024² tiles) | 8612.2 | 8560.7 | 4813.8 | 2717.9 | 1812.2 | 1760.1 | 4.9× |
+
+**4096² centre crop** (`prmdbench --scaling 1,2,4,8,0`, encode_file wall time, median of 3; *auto* = 14 threads). *identical*: the file is the same at every count.
+
+Gray:
+
+| codec | N=1 | N=2 | N=4 | N=8 | auto | speedup | identical |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| haar | 73 ms | 40 ms | 25 ms | 19 ms | 21 ms (14 used) | 3.52× | yes |
+| cdf53 | 93 ms | 55 ms | 35 ms | 29 ms | 34 ms (14 used) | 2.72× | yes |
+| laplacian-box | 135 ms | 76 ms | 47 ms | 34 ms | 36 ms (14 used) | 3.73× | yes |
+| laplacian-gauss | 186 ms | 101 ms | 59 ms | 42 ms | 44 ms (14 used) | 4.25× | yes |
+| naive | 99 ms | 53 ms | 33 ms | 23 ms | 22 ms (14 used) | 4.39× | yes |
+| j2k-t256 | 1483 ms | 907 ms | 631 ms | 655 ms (4 used) | 632 ms (4 used) | 2.35× | yes |
+| j2k-t1024 | 1501 ms | 799 ms | 436 ms | 272 ms | 245 ms (14 used) | 6.12× | yes |
+| haar+zstd19 | 1217 ms | 625 ms | 330 ms | 179 ms | 137 ms (14 used) | 8.88× | yes |
+| haar+range | 517 ms | 265 ms | 140 ms | 78 ms | 60 ms (14 used) | 8.69× | yes |
+
+RGB:
+
+| codec | N=1 | N=2 | N=4 | N=8 | auto | speedup | identical |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| haar | 261 ms | 142 ms | 83 ms | 57 ms | 60 ms (14 used) | 4.34× | yes |
+| cdf53 | 328 ms | 185 ms | 111 ms | 87 ms | 102 ms (14 used) | 3.22× | yes |
+| laplacian-box | 508 ms | 275 ms | 156 ms | 104 ms | 106 ms (14 used) | 4.80× | yes |
+| laplacian-gauss | 656 ms | 353 ms | 198 ms | 126 ms | 130 ms (14 used) | 5.06× | yes |
+| naive | 350 ms | 189 ms | 107 ms | 70 ms | 66 ms (14 used) | 5.30× | yes |
+| j2k-t256 | 3045 ms | 1931 ms | 1480 ms | 1475 ms (4 used) | 1440 ms (4 used) | 2.11× | yes |
+| j2k-t1024 | 3023 ms | 1665 ms | 929 ms | 601 ms | 572 ms (14 used) | 5.28× | yes |
+| haar+zstd19 | 9163 ms | 4687 ms | 2471 ms | 1321 ms | 977 ms (14 used) | 9.37× | yes |
+| haar+range | 1137 ms | 582 ms | 309 ms | 174 ms | 138 ms (14 used) | 8.21× | yes |
+
+- Block coding scales almost linearly with the slow coders (range, zstd 19: 8–9× at 14 threads); with zstd 1 the whole encode reaches 3.5–5×, limited by memory bandwidth in the transforms and by what stays serial (allocating level planes, writing the file: 12 ms of the 54 ms gray `haar` encode at 14 threads, [pipeline_durations.md](pipeline_durations.md)).
+- Beyond 8 threads the zstd-1 encodes gain nothing on this machine (its cores are not all equal), and `cdf53` gets slightly slower.
+- JPEG2000 with 256² tiles uses at most 4 threads: OpenJPEG codes one tile at a time, and more threads made it slower. 1024² tiles scale to 5–6×. Its output is identical at every thread count too.
+- Peak memory (`/usr/bin/time`, full image) fell with the same change and does not grow with threads: `haar` RGB 2.21 → 1.43 GB, `laplacian` RGB q4 3.91 → 1.68 GB, `haar` gray 0.87 → 0.57 GB.
+
 ## Entropy coder and zstd level
 
 **Coder.** zstd: 11.58 MiB at 0.62 ms per 256² crop. Range coder: 11.13 MiB at 7.6 ms. zstd is the default ([design.md §7.1](design.md)).

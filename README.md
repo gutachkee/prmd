@@ -27,11 +27,27 @@ sudo apt install build-essential cmake pkg-config \
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # -DPRMD_NATIVE=OFF to skip -mcpu=native
 cmake --build build -j
-ctest --test-dir build -j8 --output-on-failure    # 222 tests
+ctest --test-dir build -j8 --output-on-failure    # 847 tests
 ```
 
 This produces `build/prmd` (CLI), `build/prmdbench` (benchmark), `build/prmdpipeline`
-(per-step pipeline timing) and `build/prmd_tests`.
+(per-step pipeline timing), `build/prmd_tests` and `build/prmd_profile_tests`.
+
+### Sanitizer builds
+
+`PRMD_SANITIZE` adds `-fsanitize=...` to every target, with every finding fatal so ctest fails
+on it. Use a separate build directory:
+
+```sh
+cmake -B build-asan -DPRMD_SANITIZE=address,undefined && cmake --build build-asan -j
+ctest --test-dir build-asan -j8 --output-on-failure
+
+CC=clang CXX=clang++ cmake -B build-tsan -DPRMD_SANITIZE=thread && cmake --build build-tsan -j
+ctest --test-dir build-tsan -j8 --output-on-failure
+```
+
+ThreadSanitizer checks the multithreaded encoder. Build it with clang: GCC 15's libtsan crashes
+(SIGILL in `pthread_cond_wait`) on aarch64 with pointer authentication.
 
 ### Pipeline timers (off by default)
 
@@ -47,8 +63,8 @@ build/prmdpipeline test_image.jpg --runs 5                        # totals witho
 
 `prmdpipeline` encodes once and decodes one 256² crop per level (overview, then zooming in) plus
 4 pans and jumps at L0: 10 crops with the default `--levels 6`. `--levels`, `--mode`, `--down`,
-`--color`, `--quant`, `--entropy`, `--entropy-level`, `--tile`, `--cblk` and `--cache-mib` change
-the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
+`--color`, `--quant`, `--entropy`, `--entropy-level`, `--tile`, `--cblk`, `--cache-mib` and
+`--threads` (encoder threads, default 1) change the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
 (default `pipeline.prmd` in the current directory) and `--label` names the run in the report. Results and method:
 [`docs/pipeline_durations.md`](docs/pipeline_durations.md).
 
@@ -86,6 +102,7 @@ build/prmd info img.prmd
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
 | `--no-med` | store base-block pixels as they are, without MED prediction (the coarsest level; every level for `naive`). Faster crops, larger file: gray `naive` +23%, crops about 1.5× faster ([benchmarks.md](docs/benchmarks.md)) | MED on |
 | `--no-ycocg` | store R, G, B as they are, without YCoCg-R (`rgb` only; ignored for gray) | YCoCg-R on |
+| `--threads` | encoder threads: 0 = one per hardware thread, 1 = serial, N. The `.prmd` file is byte-identical for every value; at most one thread per code-block. J2K uses at most one thread per 4 code-blocks of a tile (4 for 256² tiles) | 0 |
 | `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
 
 Exit codes: 0 ok, 1 usage, 2 I/O error, 3 format error, 4 out of range.
@@ -98,12 +115,18 @@ Exit codes: 0 ok, 1 usage, 2 I/O error, 3 format error, 4 out of range.
 #include "prmd/image_io.h"
 
 prmd::EncodeOptions opt;            // levels, color, transform, entropy, tile/cblk, ...
+opt.threads = 0;                    // default: all hardware threads; 1 = serial, on this thread
 prmd::encode_file(prmd::load_image("in.jpg"), "img.prmd", prmd::Codec::Prmd, opt);
 
 auto dec = prmd::open_decoder("img.prmd");        // .prmd or .j2k, chosen by file magic
 prmd::DecodeResult r = dec->decode(2, {100, 50, 256, 256});
 // r.image (Gray8/RGB8), r.rect, r.stats {tiles_touched, blocks_decoded, bytes_read, read_calls, ...}
 ```
+
+Encoding is multithreaded by default (`EncodeOptions::threads = 0`, one thread per hardware
+thread; see [design.md §1.4](docs/design.md)), and the file does not depend on the thread count.
+A program that already encodes several images in parallel should pass `threads = 1`. Decoding is
+single-threaded; a decoder must not be shared between threads.
 
 ## Benchmark
 
@@ -113,6 +136,11 @@ build/prmdbench test_image.jpg --size 4096 --iters 100 --color rgb --no-entropy-
                 --codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,haar+range,haar+zstd19 \
                 --lossy --out build/bench/results_rgb.md
 ```
+
+Encodes run on one thread unless `--threads N` is given (0 = all hardware threads), so the
+encode column stays comparable with the published single-core tables. `--scaling 1,2,4,8,0`
+adds an encode-scaling table (time per thread count, speedup, and a check that every count
+writes the same file).
 
 It reports file sizes (vs raw and vs naive), mean/p50/p95 latency for random 256² and 512² crops
 at every level, tiles touched, blocks decoded and bytes read per crop, an entropy-coder comparison

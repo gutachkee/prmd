@@ -17,7 +17,7 @@ Where does the time go when you encode an image once and then read about 10 crop
 | image | `test_image.jpg`: 8824 × 5336 RGB JPEG (47 MP, 13 MiB) |
 | pyramid | `--levels 6`, so L5 (276 × 167) is the coarsest level |
 | defaults | `haar`, `gray`, zstd level 1, `--cblk 128`, `--tile 256`, lossless, no cache |
-| machine | MacBook Pro, Apple Silicon (14 cores, aarch64) under Linux, GCC 15.2 `-O2 -mcpu=native`, zstd 1.5.7, single thread |
+| machine | MacBook Pro, Apple Silicon (14 cores, aarch64) under Linux, GCC 15.2 `-O2 -mcpu=native`, zstd 1.5.7, single thread (`prmdpipeline --threads 1`, the default) except in [Multithreaded encode](#multithreaded-encode-update) |
 | repeats | every scenario run 5 times in one process; each number is the median |
 | date | 2026-11-16 |
 
@@ -58,6 +58,25 @@ The timers are part of the code, and are compiled out unless you ask for them.
 - **Overhead of the timers.** The two builds agree within run-to-run noise: encode within ±8% and the 10 crops within ±5%. The timer build was faster in about half the rows, so the differences are noise, not overhead. A crop runs about 110 timer scopes, an estimated 1% of its time.
 - **One host effect to know about.** On this machine an occasional process runs `naive` decode about 25% slower throughout: 7.1–7.3 ms for the 10 crops instead of 5.5–5.9 ms. That happened in about 1 of 6 processes in both builds, pinned to a core or not, and once switched to fast partway through a run. It looks like the virtual CPU being scheduled on a slower core. MED reconstruction is a serial chain of dependent operations and shows it most. The `naive` row uses a rerun in the fast state, and `med_reconstruct` in the defaults moves between 0.40 and 0.70 ms for the same reason.
 - **I/O.** The file has just been written, so every read is served from the OS page cache. A cold disk would make `pread` cost more. That was not measured.
+
+## Multithreaded encode (update)
+
+The encode tables below were measured before the encoder became multithreaded. The same change also fixed findings 3–5 under [Encode](#encode) for one thread: the `cdf53` vertical pass is row-major (`cdf53` gray encode of the full image 1220 → 290 ms), the Laplacian loop upsamples once per level instead of twice and fuses its per-sample steps (`laplacian` RGB q4 2498 → 1854 ms), the quantize pass is skipped when lossless, bands are moved instead of copied, the gray conversion is fused into building the int32 planes, and planes that a pass overwrites are no longer zero-filled first. Some step names changed: `to_planes` is now inside `convert`, `copy_bands` is `move_bands`, `copy_base` is `move_base`, and the Laplacian loop has `predict_upsample` and `residual_reconstruct`. Files are byte-identical to before.
+
+Defaults (`haar`, gray, zstd 1), timer build, median of 5, `prmdpipeline --threads 1` and `--threads 14`. At 14 threads, steps opened on the calling thread are wall time; the per-block steps under `encode_blocks` add up the time of all 14 threads (93% of it on workers), so they exceed their parent ([profile.h](../include/prmd/profile.h), "Threads").
+
+| step | 1 thread: ms | 14 threads: ms | 14 threads: what it is |
+|---|---:|---:|---|
+| **`encode_prmd`** | **229** | **54.2** | wall |
+| └ `convert` (gray + int32 planes) | 30.6 | 9.0 | wall, row stripes |
+| └ `decompose` / `forward` | 50.2 | 15.2 | wall, row stripes |
+| └ `stored_planes` | 0.48 | 0.54 | wall (moves only when lossless) |
+| └ `encode_blocks` | 139 | 15.3 | wall, 3906 blocks over 14 threads |
+|  └ `make_block` | 10.3 | 23.8 | summed over threads |
+|  └ `entropy_encode` | 128 | 177 | summed over threads (zstd 143, pack 30.5) |
+| └ `write_file`, 31.6 MiB | 8.6 | 12.4 | wall, serial |
+
+The block stage scales 9×; summed over threads it costs 1.4× the single-thread time (shared caches and memory bandwidth, and unequal cores). What is left serial at 14 threads is mainly `write_file` (23% of the encode) and allocating the level planes. Loading the JPEG (180 ms) is now 3.3× the encode. Scaling for every mode: [benchmarks.md](benchmarks.md#encode-scaling-multithreaded-encoder).
 
 ## Timeline: defaults (`haar`, gray, zstd 1)
 

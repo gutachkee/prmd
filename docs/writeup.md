@@ -71,7 +71,7 @@ Mean / p95 latency and bytes read per crop (block data, not counting the index):
 
 ## 4. Limitations
 
-- Only 8-bit gray and RGB. The decoder is single-threaded.
+- Only 8-bit gray and RGB. The decoder is single-threaded (the encoder uses every core by default, with the same output for any thread count).
 - 32-bit block offsets cap a file at 4 GiB.
 - No checksums: a damaged block can decode to wrong pixels without an error, so integrity is left to the storage layer.
 - Lossy `haar` and `cdf53` have no per-pixel error bound, and JPEG2000 beats all modes on lossy rate–distortion.

@@ -209,6 +209,10 @@ struct EncodeOptions {
   bool med = true;                   // MED on base blocks (§3.3); false stores pixel values
   bool ycocg = true;                 // YCoCg-R on RGB (§5.1); false stores R, G, B. Ignored
                                      //   for gray. Both are recorded in header byte 30 (§3.1)
+  int threads = 0;                   // encoder threads (.prmd and J2K): 0 = one per hardware
+                                     //   thread, 1 = serial (no thread started), N = N threads.
+                                     //   < 0 rejected, > 256 clamped. The file does not depend
+                                     //   on it (see "Threads" below)
   // J2K
   int   j2k_tile = 256;              // full-resolution tile size (benchmarked: 256, 1024)
   int   j2k_cblk = 64;
@@ -220,12 +224,55 @@ struct EncodeReport {
   uint64_t file_bytes = 0;
   std::array<uint64_t, kMaxLevels> level_bytes{};  // payload bytes attributed to each level
   double   encode_ms = 0;
+  int      threads = 1;              // threads the encode ran on, the caller included
 };
 
 EncodeReport encode_file(const Image& src, const std::string& out_path,
                          Codec codec, const EncodeOptions& opts);
 }
 ```
+
+**Threads.** `encode_file` can use several threads; decoding is single-threaded (§11 L2).
+
+- *Output.* A `.prmd` file is **byte-identical for every `threads` value**: the format already
+  makes every code-block a pure function of the stored planes, entropy-coded with fresh state
+  (§2.4), and everything before block coding is per sample or per row of a level. Threads only
+  change who computes which piece; each piece writes its own slot, and the file is assembled in
+  block-id order. There is no format change and no version bump. Tests pin the serial output to
+  golden hashes of the encoder before threading and compare every thread count against it (§9).
+- *Default.* `threads = 0` uses `std::thread::hardware_concurrency()` (1 if unknown). This
+  default makes the library use all cores of the host, a change for embedders that call
+  `encode_file` from their own worker threads: pass `threads = 1` there. The CLI has `--threads`
+  (§4.1); `prmdbench` and `prmdpipeline` default to 1, so their published numbers stay
+  single-core.
+- *Count used.* `.prmd` uses at most one thread per present code-block (an image with a single
+  block runs serially) and at most 256; `EncodeReport::threads` says how many it used. With one
+  thread no pool exists: every stage runs its loop once on the calling thread, no thread is
+  started.
+- *Mechanism* (`internal/parallel.h`, §2.8). One fixed-size `Pool` per call (the caller plus
+  `threads − 1` workers), so concurrent `encode_file` calls from different user threads stay
+  independent. Stages: level-0 planes straight from the source (colour conversion fused in) by
+  row; `forward` (Haar, Cdf53) and the box/Gauss downsamplers by row stripes of the output level;
+  YCoCg-R and quantization in runs of 16 Ki samples; the Laplacian closed loop serially over
+  levels, each level's upsample by rows and its residual/reconstruction pass by sample runs; then
+  code-blocks, one per job, coded into exact-size payloads. Offsets are summed in id order and the
+  payloads are streamed to the file. Planes that a pass overwrites entirely are allocated without
+  zero-filling (`Region(rect, kNoInit)`, §2.1), so their pages are first touched by the threads
+  that write them.
+- *Errors.* Jobs are claimed in increasing index order. If any fail, the exception of the
+  lowest failing index is rethrown once all threads are idle, the same exception (type and
+  message) that the serial loop throws first, at every thread count. The output file is created
+  only after every block is coded, so a failed encode leaves no file (and an existing file at
+  `out_path` untouched). The one ordering difference: the 4 GiB data-size check runs after all
+  blocks are coded, so a block coder error in a later block wins over it.
+- *J2K.* `threads` is passed to `opj_codec_set_threads` (not called for 1, as before). OpenJPEG's
+  output is byte-identical for every thread count (tested on gray, RGB, lossless and lossy).
+  OpenJPEG parallelizes the code-blocks of one tile at a time, so small tiles cannot use many
+  threads: the encoder uses at most `(j2k_tile / j2k_cblk)² / 4` threads, i.e. 4 for the default
+  256² tiles with 64² code-blocks (on `test_image.jpg` 14 threads were slower than 4 there), 14
+  of 14 for 1024² tiles.
+- *Profiling.* With `PRMD_PROFILE`, steps that run on workers are merged into the calling
+  thread's profile tree; their times are summed over threads (`profile.h`, "Threads").
 
 ### 1.5 `pyramid.h`: the normative level definitions
 ```cpp
@@ -262,10 +309,16 @@ These are not part of the public API, but they are fixed here so the components 
 ```cpp
 namespace prmd::internal {
 // A rectangle of int32 samples, addressed in the coordinates of the plane it belongs to.
+// std::vector<int32_t> whose allocator can skip value-initialization (SampleAllocator): it zeroes
+// new elements like std::vector unless created by uninitialized_samples(n).
+using Samples = std::vector<int32_t, SampleAllocator<int32_t>>;
+Samples uninitialized_samples(size_t n);   // values unspecified: write every one before reading
+
 struct Region {
   Rect rect;                         // position inside the owning plane
-  std::vector<int32_t> v;            // rect.w * rect.h, row-major
+  Samples v;                         // rect.w * rect.h, row-major
   explicit Region(const Rect& r);    // zero-filled
+  Region(const Rect& r, NoInit);     // unspecified samples, for a plane a pass writes entirely
   int32_t& at(int x, int y);         // absolute plane coordinates
   int32_t  at(int x, int y) const;
   int32_t* row(int y);               // start of row y (absolute); element i is column rect.x + i
@@ -279,6 +332,8 @@ void copy_overlap(const Region& src, Region& dst);   // same plane coordinates
 ```cpp
 namespace prmd::internal {
 std::vector<Region> to_planes(const Image& img);                       // one plane per channel
+// to_planes(convert(img, stored)) in one pass, rows split over `pool` (encoder level 0).
+std::vector<Region> to_planes(const Image& img, ColorFormat stored, Pool* pool);
 Image from_planes(const std::vector<Region>& planes, ColorFormat f);   // clamps to [0, 255]
 // [level][channel] integer chain (unclamped; matters only for Cdf53).
 std::vector<std::vector<Region>> build_level_planes(const Image& src, int levels, Transform t, Downsampler d);
@@ -305,8 +360,10 @@ class LevelTransform {
   // Band samples belonging to the code-block whose pixel rect is fine_r (block → band mapping).
   virtual Rect band_rect_of_block(const Rect& fine_r, Dims fine) const = 0;
 
-  // Encoder: full fine level → full coarse level (half_up(fine)) + full bands.
-  virtual void forward(const Region& fine, Region& coarse, std::vector<Region>& bands) const = 0;
+  // Encoder: full fine level → full coarse level (half_up(fine)) + full bands. With a pool,
+  // rows are split over its threads; the result is the same for every pool and for none.
+  virtual void forward(const Region& fine, Region& coarse, std::vector<Region>& bands,
+                       Pool* pool = nullptr) const = 0;
 
   // Decoder: coarse / band samples needed to rebuild fine rect r, already clipped to the planes.
   virtual Rect coarse_needed(const Rect& fine_r, Dims fine) const = 0;
@@ -319,8 +376,11 @@ class LevelTransform {
 
 // Throws std::invalid_argument for Transform::Independent (it has no level transform).
 std::unique_ptr<LevelTransform> make_transform(Transform t, Downsampler d);
-Region downsample_box(const Region& fine);     // used by Laplacian-box and naive
-Region downsample_gauss(const Region& fine);   // used by Laplacian-gauss
+Region downsample_box(const Region& fine, Pool* pool = nullptr);     // Laplacian-box and naive
+Region downsample_gauss(const Region& fine, Pool* pool = nullptr);   // Laplacian-gauss
+// Laplacian prediction U(coarse) of a whole level: the inverse with a zero residual.
+void laplacian_upsample(Downsampler d, const Region& coarse, Dims fine, Region& out,
+                        Pool* pool = nullptr);
 }
 ```
 
@@ -360,7 +420,7 @@ struct BlockPlanes {
   int w = 0, h = 0;                           // per-plane dims (identical for all planes in a block)
   int channels = 1;                           // 1 or 3
   std::vector<Band> kinds;                    // one per plane
-  std::vector<std::vector<int32_t>> planes;   // each w*h, row-major
+  std::vector<Samples> planes;                // each w*h, row-major
 };
 
 // Reversible color decorrelation (YCoCg-R) applied in place to channel triplets of any
@@ -429,11 +489,41 @@ std::unique_ptr<CropDecoder> open_j2k(const std::string& path, const DecoderOpti
 ### 2.7 `prmd_codec.h`: .prmd entry points
 ```cpp
 namespace prmd::internal {
-EncodeReport encode_prmd(const Image& src, const std::string& path, const EncodeOptions& opts);
+// coder: replaces the opts.entropy coder (tests inject failures); null = the normal one.
+EncodeReport encode_prmd(const Image& src, const std::string& path, const EncodeOptions& opts,
+                         const BlockCoder* coder = nullptr);
 std::unique_ptr<CropDecoder> open_prmd(const std::string& path, const DecoderOptions& opts);
 void validate_prmd_options(const EncodeOptions& opts);   // std::invalid_argument
 }
 ```
+
+### 2.8 `parallel.h`: the encoder's thread pool
+```cpp
+namespace prmd::internal {
+constexpr int kMaxThreads = 256;
+// 0 → hardware (1 if 0); positive values as given; clamped to [1, kMaxThreads]; < 0 throws.
+int resolve_threads(int requested, unsigned hardware);
+int resolve_threads(int requested);                       // hardware_concurrency()
+
+class Pool {                       // threads − 1 workers + the caller; joined by the destructor
+ public:
+  explicit Pool(int threads);      // keeps the workers it could start if the system refuses more
+  int size() const;
+  // fn(begin, end) over chunks of [0, n), `grain` long, claimed in increasing order from an
+  // atomic counter; blocks until all are done. Inline fn(0, n) when n <= grain, without
+  // workers, or nested in another run(). Exceptions: unclaimed chunks are skipped, the lowest
+  // failing chunk's exception is rethrown (= the serial loop's first). Workers' PRMD_TIMED
+  // scopes are merged under the caller's open scope.
+  void run(size_t n, size_t grain, const std::function<void(size_t, size_t)>& fn);
+};
+// fn(0, n) / fn(0, h) when pool is null (the serial encoder), else pool->run.
+void parallel_for(Pool*, size_t n, size_t grain, fn);
+void parallel_rows(Pool*, int h, int width, fn);         // ~16 Ki samples per row stripe
+void parallel_samples(Pool*, size_t n, fn);              // 16 Ki-sample runs
+}
+```
+Not work-stealing: all parallel work is flat (one level of `run`), so a shared counter is
+enough. No global state; a pool lives for one `encode_prmd` call.
 
 ---
 
@@ -506,8 +596,10 @@ prmd encode <in.jpg|in.png> <out> [--codec prmd|j2k] [--color gray|rgb]   (defau
            [--levels 5] [--tile 256] [--cblk 128] [--quant Q]
            [--entropy zstd|range|raw] [--entropy-level N]   (default zstd, level 1)
            [--no-med] [--no-ycocg]                           (.prmd only; default both on)
+           [--threads N]                                     (default 0 = all hardware threads)
            [--j2k-tile 256] [--j2k-lossy-psnr DB]
-        → prints EncodeReport (size, ratio vs raw L0 and raw pyramid, per-level bytes, time)
+        → prints EncodeReport (size, ratio vs raw L0 and raw pyramid, per-level bytes, time,
+          threads used)
 
 prmd decode <file> --level L --x X --y Y --w W --h H -o crop.png [--clamp] [--stats]
         → writes the crop. --stats prints DecodeResult::stats. --clamp uses decode_clamped and prints
@@ -523,7 +615,12 @@ Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of range.
 prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096] [--color gray|rgb|both]
          [--codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,j2k-t1024]
          [--out <exe dir>/bench/results.md] [--workdir DIR] [--no-entropy-table] [--lossy]
+         [--threads 1] [--scaling 1,2,4,8,0]
 ```
+`--threads` is `EncodeOptions::threads` for every encode (default 1, so the encode column stays
+a single-core number comparable across reports). `--scaling` adds an "Encode scaling" table:
+each `--codecs` codec encoded at every listed thread count (0 = all hardware threads), median of
+3, with the speedup, the threads actually used and a byte-identity check across counts.
 Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 1); `+range`, `+raw`, `+zstd19`
 (the previous default) variants exist for the entropy table, which compares every coder on haar, cdf53 **and naive**, so the
 "vs naive" comparison is always made with the same coder on both sides.
@@ -535,12 +632,15 @@ The input is converted to the requested color format(s) and center-cropped or ed
 prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
              [--color gray|rgb] [--quant Q] [--entropy zstd|range|raw] [--entropy-level N]
              [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] [--file pipeline.prmd] [--label text]
+             [--threads 1]
 ```
 Loads the image, encodes it once, then decodes a fixed navigation plan: one 256² crop per level
 from the coarsest down, then 4 pans/jumps at L0 (10 crops at `--levels 6`). Prints median wall
 times over `--runs`. Per-step timers (`PRMD_TIMED`, `include/prmd/profile.h`) are compiled in
 only with the CMake option `-DPRMD_PROFILE=ON` (default OFF); without it the macro expands to
-nothing. Results and method: [pipeline_durations.md](pipeline_durations.md).
+nothing. `--threads N` (default 1) sets the encoder threads; with N > 1 the breakdown adds an
+"on workers" column, and steps that ran on pool workers show time summed over threads (they can
+exceed their parent's wall time). Results and method: [pipeline_durations.md](pipeline_durations.md).
 
 ---
 
@@ -753,7 +853,13 @@ The rest of this section describes the **`range`** coder.
 
 ## 9. Testing (gtest, `tests/`)
 
-222 tests, all registered with ctest through `gtest_discover_tests`.
+847 tests, all registered with ctest through `gtest_discover_tests` (`prmd_tests`, plus
+`prmd_profile_tests`, which links a copy of the core built with `PRMD_PROFILE`). The suite runs
+clean under ASan + UBSan (`-DPRMD_SANITIZE=address,undefined`) and TSan
+(`-DPRMD_SANITIZE=thread`; use clang: GCC 15's libtsan crashes in `pthread_cond_wait` on
+aarch64 with pointer authentication). Most tests encode with the default `threads = 0`, so on a
+multi-core machine the crop matrix, lossy and corruption tests run on multithreaded output;
+`test_threads.cpp` covers thread counts explicitly.
 
 | Test file | What it covers |
 |---|---|
@@ -763,8 +869,11 @@ The rest of this section describes the **`range`** coder.
 | `test_blockcoder.cpp` | parameterised over every `Entropy`: round-trip of random, Laplacian-distributed and extreme values for every `Band` and 1/3 channels; truncated payload → `FormatError`; full int32 magnitudes for range; out-of-int16 → zstd/raw throw; YCoCg-R and MED round-trip |
 | `test_codec.cpp` | **crop matrix** for 11 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+range, cdf53+raw, naive without MED, naive without MED and YCoCg-R, haar+range without both, laplacian-box without YCoCg-R) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, flag bits, reserved bytes, huge block count, huge dimensions, too-small cblk, level table, truncation) and option validation (including geometry the level table can't hold); bounds with coordinates near `INT_MAX`; haar and cdf53 smaller than naive; the MED/YCoCg-R flags recorded in byte 30 (and not recorded for gray), and MED making naive smaller; **LRU eviction** (a 300 KiB budget, far below the working set, over 250 random crops at every level: all exact, and an evicted crop is decoded again); **corrupt payloads** with a valid index, for every config and so every coder: random bytes in every block (gray and RGB) never crash and zstd rejects every level, and blocks cut by 1 byte, half or all of their payload give `FormatError` for zstd and raw (range: no crash). These run clean under ASan + UBSan |
 | `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+range × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
-| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection; `--no-med --no-ycocg` encodes, decodes exactly and is rejected for J2K |
+| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection; `--no-med --no-ycocg` encodes, decodes exactly and is rejected for J2K; `--threads` rejects `-1`, `abc`, `1.5`, a missing value, and writes the `--threads 1` file for 0, 2, 3, 16, 1000 |
 | `test_j2k.cpp` | gray/RGB × 256/1024 tiles: L0 lossless vs source; 150 random crops + edges/corners at every level vs J2K's own full-level decode; TLM single-tile crop reads < ¼ of the file; bounds |
+| `test_parallel.cpp` | the thread pool: `resolve_threads` (0, hardware 0, negative, clamping to 256); every index of [0, n) exactly once for 1–16 threads and several grains; inline single-call execution for 1 thread and small jobs; zero and one item; more threads than items; results identical for every thread count; the lowest failing index's exception under random delays and inside chunks; reuse across 300 runs and after exceptions; nested `run`; row stripes |
+| `test_threads.cpp` | the multithreaded encoder over a 265-case matrix (`thread_matrix.h`: 12 modes incl. both downsamplers, all coders, no-MED/no-YCoCg × gray/RGB × 1×1, 3×2, 17×1, 1×23, single-block, many-block, odd and 1000×777 sizes; lossy steps 1/3/8; zstd 3/19/22; 1 and 8 levels; cblk 16 and 4096; encoder colour conversion; full-range noise; integer-only images): **golden hashes** of the serial encoder before threading (fc0a629) and **identical files** at 2, 3, 7, 16, 0 and 1000 threads; `threads = 1` codes every block on the calling thread and starts no thread (`/proc/self/task`), 4 threads start exactly 3 and join them; `EncodeReport::threads`, clamping to blocks and 256, negative counts rejected without a file; parallel `forward`, downsamplers, Laplacian upsampler and fused `to_planes` equal the serial ones; multithreaded files decode to the reference pyramid; four user threads encoding at once; **fault injection** (a coder that throws for some blocks): same exception at every thread count, no file left, an existing file untouched, early stop; J2K files identical across thread counts and its per-tile thread cap |
+| `test_profile.cpp` | (`prmd_profile_tests`) worker `PRMD_TIMED` scopes merged under the caller's scope with complete call counts, `worker_calls`/`worker_ms`, wall vs summed time, scopes opened only on workers, reset; a 4-thread encode has the same tree and call counts as a serial one |
 
 **Random-access proof** (`test_codec.cpp`, every .prmd config):
 - (a) An independent re-derivation of the dependency rule gives the expected block set. `blocks_decoded` must equal its size, and `bytes_read` must equal the exact sum of those payloads.
@@ -801,7 +910,7 @@ The rest of this section describes the **`range`** coder.
 | R3 | ancestor decoding makes a single-block crop cost about N blocks in A/B/C | geometric shrink, ~1–2 blocks per level; LRU cache; quantified in the benchmark |
 | R4 | resetting contexts per block costs compression | `cblk` is a parameter; benchmark 64/128/256 |
 | L1 | RGB handles 8-bit 3-channel only; YCoCg-R is applied to coefficients, not as a pre-transform | next step: a context that shares statistics across channels; other formats (alpha, 16-bit) |
-| L2 | a single-threaded decoder | next step: decode blocks of the same level in parallel |
+| L2 | a single-threaded decoder (the encoder is multithreaded, §1.4) | next step: the encoder's `Pool` (§2.8) can drive decode. In `PrmdDecoder::read_run` the blocks missing from the cache for one level are independent decodes: decode them into a vector in parallel, then insert into the cache and the output serially in the same order (the cache stays single-threaded; lowest-index exception rule for corrupt payloads). Full-level decodes and large crops can also use row stripes in `inverse`. A 256² crop (≈20 blocks, 0.6 ms) gains little, so parallelize only above a block threshold; `DecoderOptions::threads` should default to 1, because latency-bound callers usually parallelize across crops |
 | L3 | the box filter aliases (modes A and naive) | modes B and C-gauss exist for exactly this reason; quality is reported |
 
 ---
@@ -809,22 +918,25 @@ The rest of this section describes the **`range`** coder.
 ## 12. Source layout
 
 ```
-CMakeLists.txt                 Release: -O2 -mcpu=native; _FILE_OFFSET_BITS=64; option PRMD_PROFILE (OFF).
-                               Deps: JPEG, PNG, GTest, zstd, libopenjp2 (pkg-config)
+CMakeLists.txt                 Release: -O2 -mcpu=native; _FILE_OFFSET_BITS=64; options PRMD_PROFILE (OFF),
+                               PRMD_SANITIZE (address,undefined | thread). Deps: JPEG, PNG, GTest, zstd,
+                               libopenjp2 (pkg-config), Threads
 include/prmd/                  image.h image_io.h crop_decoder.h encoder.h pyramid.h errors.h profile.h
 include/prmd/internal/         region.h planes.h transform.h rangecoder.h (header-only) blockcoder.h
                                prmd_format.h prmd_codec.h j2k_codec.h file.h (pread wrapper)
-                               timing.h (PRMD_TIMED)
+                               timing.h (Clock) parallel.h (thread pool) profile_threads.h
 src/                           image.cpp image_io.cpp pyramid.cpp transform.cpp (haar, cdf53, laplacian,
                                downsamplers) blockcoder.cpp (factory, YCoCg-R, MED) blockcoder_range.cpp
                                blockcoder_bytes.cpp (zstd, raw) prmd_format.cpp prmd_encoder.cpp
                                prmd_decoder.cpp j2k_codec.cpp crop_decoder.cpp encoder.cpp profile.cpp
+                               parallel.cpp
 tools/prmd_cli.cpp             → executable `prmd` (library target: `prmd_core`, to avoid a name clash)
 tools/prmd_pipeline.cpp        → executable `prmdpipeline` (§4.3)
 tools/prmd_bench.cpp           → executable `prmdbench` (§4.2, §10)
-tests/                         reference.{h,cpp} test_util.h test_image.cpp test_rangecoder.cpp
-                               test_transform.cpp test_blockcoder.cpp test_codec.cpp test_lossy.cpp
-                               test_j2k.cpp test_cli.cpp
+tests/                         reference.{h,cpp} test_util.h thread_matrix.h test_image.cpp
+                               test_rangecoder.cpp test_transform.cpp test_blockcoder.cpp test_codec.cpp
+                               test_lossy.cpp test_j2k.cpp test_cli.cpp test_parallel.cpp
+                               test_threads.cpp test_profile.cpp
 build/bench/                   benchmark output, git-ignored: reports results*.md, level-3 samples in samples/
 docs/design.md                 this document
 docs/writeup.md                results write-up (1–2 pages)
