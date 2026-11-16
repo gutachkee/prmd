@@ -200,7 +200,7 @@ struct EncodeOptions {
   int quant = 0;                     // 0 = lossless; Q > 0 = lossy step (§5.2); not for naive
   Entropy entropy = Entropy::Zstd;   // block payload coder (§7); default chosen in §7.1
   int entropy_level = 0;             // coder-specific effort; 0 = coder default.
-                                     //   Zstd: 1..22 (default 19). Range, Raw: must be 0.
+                                     //   Zstd: 1..22 (default 1). Range, Raw: must be 0.
   // J2K
   int   j2k_tile = 256;              // full-resolution tile size (benchmarked: 256, 1024)
   int   j2k_cblk = 64;
@@ -489,7 +489,7 @@ The output of `BlockCoder::encode` for the coder named in the header (§7). Ther
 prmd encode <in.jpg|in.png> <out> [--codec prmd|j2k] [--color gray|rgb]   (default gray)
            [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
            [--levels 5] [--tile 256] [--cblk 128] [--quant Q]
-           [--entropy zstd|range|raw] [--entropy-level N]   (default zstd, level 19)
+           [--entropy zstd|range|raw] [--entropy-level N]   (default zstd, level 1)
            [--j2k-tile 256] [--j2k-lossy-psnr DB]
         → prints EncodeReport (size, ratio vs raw L0 and raw pyramid, per-level bytes, time)
 
@@ -508,8 +508,8 @@ prmdbench <image> [--levels 5] [--iters 1000] [--seed 1] [--size 4096] [--color 
          [--codecs haar,cdf53,laplacian-box,laplacian-gauss,naive,j2k-t256,j2k-t1024]
          [--out bench/results.md] [--workdir DIR] [--no-entropy-table] [--lossy]
 ```
-Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 19); `+range`, `+raw`, `+zstd3`
-variants exist for the entropy table, which compares every coder on haar, cdf53 **and naive**, so the
+Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 1); `+range`, `+raw`, `+zstd19`
+(the previous default) variants exist for the entropy table, which compares every coder on haar, cdf53 **and naive**, so the
 "vs naive" comparison is always made with the same coder on both sides.
 
 The input is converted to the requested color format(s) and center-cropped or edge-padded to `size²`. All codecs are encoded into a temp directory and then measured (§10).
@@ -589,12 +589,12 @@ reconstruct(L, R):                         // R is in level-L coordinates, insid
 
 ## 7. Entropy coding
 
-The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 40). Every coder implements `internal::BlockCoder`, so the transform, index, I/O and random-access logic don't depend on the choice.
+The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28). Every coder implements `internal::BlockCoder`, so the transform, index, I/O and random-access logic don't depend on the choice.
 
 | `Entropy` | What it does | Expected trade-off |
 |---|---|---|
 | `range` | the context-adaptive binary range coder described below | best ratio; decode is bit-serial (~10 instr/bit) |
-| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 19) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4–5% (gray), +12% (RGB)** vs `range` |
+| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 1, §7.2) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4–5% (gray), +12% (RGB)** vs `range` |
 | `raw` | zigzag int16, little-endian, no compression | the lower bound on decode cost and the upper bound on size; isolates how much time the entropy stage takes |
 
 - The expected trade-offs are estimates. The benchmark measures them.
@@ -604,7 +604,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 40
 
 ### 7.1 Decision record: zstd is the default coder (2026-11-13)
 
-**Decision.** `EncodeOptions::entropy` defaults to `Entropy::Zstd` (level 19). The CLI defaults to `--entropy zstd`. `range` stays available as an opt-in for size-critical storage. The on-disk ids are unchanged, so files written earlier with `range` still decode.
+**Decision.** `EncodeOptions::entropy` defaults to `Entropy::Zstd` (level 19; changed to level 1 on 2026-11-16, see §7.2). The CLI defaults to `--entropy zstd`. `range` stays available as an opt-in for size-critical storage. The on-disk ids are unchanged, so files written earlier with `range` still decode.
 
 **Context.** The original default was `range`, chosen on the assumption that a context-adaptive coder was needed for the ratio and that zstd would cost 15–30% in size. The benchmark disproved that assumption. It also showed that the range coder dominates decode time: `raw`, which has no entropy stage, decodes a 256² L0 crop in 0.37 ms, while `range` takes 7.0 ms.
 
@@ -640,6 +640,44 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 40
 **Follow-ups that could close the gap.**
 - A zstd dictionary trained per file and stored in the header.
 - A table-driven, context-adaptive rANS coder, which could reach the range coder's ratio at near-zstd speed. Adding it needs a new `Entropy` id and one `BlockCoder`.
+
+### 7.2 Decision record: zstd level 1 is the default (2026-11-16)
+
+**Decision.** The default zstd level (`entropy_level` = 0) changes from 19 to 1. Files keep the same format; the level byte in the header stays informational. `--entropy-level 19` remains available for the smallest RGB and lossy files.
+
+**Context.** §7.1 accepted level 19's slow encode because encoding is offline. When reference images are produced or updated on the device, encode time matters too. Measuring every level showed where level 19 actually pays off.
+
+**Evidence: gray, lossless** (4096², 5 levels, `prmd encode`, best of 2 runs). Level 19 makes files no smaller:
+
+| mode | zstd 1 | zstd 3 | zstd 9 | zstd 19 |
+|---|---:|---:|---:|---:|
+| haar | 83 ms · 11.58 MiB | 96 ms · 11.60 MiB | 217 ms · 11.67 MiB | 1221 ms · 11.59 MiB |
+| cdf53 | 330 ms · 11.18 MiB | 354 ms · 11.22 MiB | 483 ms · 11.30 MiB | 1446 ms · 11.19 MiB |
+| laplacian-gauss | 297 ms · 14.29 MiB | 314 ms · 14.29 MiB | 485 ms · 14.40 MiB | 1696 ms · 14.29 MiB |
+| naive | 106 ms · 15.04 MiB | 124 ms · 15.03 MiB | 283 ms · 15.11 MiB | 1636 ms · 15.04 MiB |
+
+**Evidence: RGB, lossless.** Only level 19 saves anything, about 4%:
+
+| mode | zstd 1 | zstd 3 | zstd 9 | zstd 12 | zstd 19 |
+|---|---:|---:|---:|---:|---:|
+| haar | 296 ms · 23.91 MiB | 350 ms · 24.02 MiB | 1084 ms · 23.79 MiB | 2323 ms · 23.65 MiB | 9191 ms · 22.92 MiB |
+| cdf53 | 1047 ms · 24.91 MiB | 1142 ms · 25.24 MiB | 1942 ms · 25.15 MiB | 3026 ms · 25.03 MiB | 9480 ms · 24.24 MiB |
+
+**Evidence: lossy** (gray, bits per pixel; PSNR is unchanged because the coder is lossless). Level 19 saves 3–12%, more at coarser quantization:
+
+| mode | Q | zstd 1 | zstd 19 | zstd 1 vs 19 |
+|---|---:|---:|---:|---:|
+| haar | 4 / 8 | 3.66 / 2.90 | 3.56 / 2.60 | +3% / +12% |
+| cdf53 | 4 / 8 | 3.53 / 2.77 | 3.41 / 2.47 | +4% / +12% |
+| laplacian-gauss | 4 / 8 | 4.72 / 3.71 | 4.60 / 3.38 | +3% / +10% |
+
+**Evidence: crop decode.** No change. In the `prmdbench` entropy table, a 256² crop at L0 takes 0.60 ms for haar at both levels, 0.80 ms for cdf53 at both, and 0.59 vs 0.58 ms for naive. (One earlier, shorter comparison showed naive 10–20% slower at level 1; the full run did not reproduce it.)
+
+**Why.** For gray lossless the speed-up is free. For RGB and lossy files, the default trades 3–12% of size for 15–30× faster encoding, and anyone who wants the smaller file can still ask for it. Why level 19 helps RGB and lossy blocks but not gray lossless ones wasn't investigated; plausibly, quantized and chroma planes contain more long repeated runs that only level 19's search finds.
+
+**Costs accepted.**
+- RGB files about 4% larger (haar 23.91 vs 22.92 MiB). The range coder remains the smallest RGB option (20.52 MiB, 1.2 s encode), at 7–12× slower decode.
+- Lossy files 3–12% larger, which widens the rate–distortion gap to JPEG2000.
 
 The rest of this section describes the **`range`** coder.
 
@@ -697,7 +735,7 @@ The rest of this section describes the **`range`** coder.
 ## 10. Benchmark methodology (`bench/prmdbench.cpp`)
 
 - **Input:** the user's JPEG (`test_image.jpg`, 8824×5336 RGB aerial photo), center-cropped to 4096², N = 5. Gray8 is the primary run (`--out bench/results.md`). An RGB8 run uses fewer codecs and iterations (`--out bench/results_rgb.md`). Both reports are regenerated output and are not tracked in git.
-- **Entropy coders:** for `haar`, `cdf53` and `naive`, one table comparing `zstd` 19 (default), `zstd` 3, `range` and `raw`: file size, size vs zstd 19, size vs naive *under the same coder*, mean and p95 latency for 256² crops at L0 and 512² at L1. `raw` approximates the non-entropy share of decode time. All other tables use the default coder (zstd 19).
+- **Entropy coders:** for `haar`, `cdf53` and `naive`, one table comparing `zstd` 1 (default), `zstd` 19 (the previous default), `range` and `raw`: file size, size vs the default, size vs naive *under the same coder*, mean and p95 latency for 256² crops at L0 and 512² at L1. `raw` approximates the non-entropy share of decode time. All other tables use the default coder (zstd 1).
 - **Sizes:** each codec's file size against raw L0 (16 MiB gray / 48 MiB RGB) and the raw pyramid (≈21.3 / 64 MiB), plus per-level bytes. PNG-per-256-tile is included as a size-only reference.
 - **Latency:**
   - crop sizes 256² and 512², at every level whose dimensions are ≥ the crop

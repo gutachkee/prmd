@@ -60,7 +60,7 @@ build/prmd info img.prmd
 | `--levels` | 1–16 | 5 |
 | `--tile`, `--cblk` | tile (reporting unit) and code-block (decode unit) size | 256, 128 |
 | `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~10× slower decode), `raw` | `zstd` — see [DESIGN.md §7.1](docs/DESIGN.md) |
-| `--entropy-level` | zstd level 1–22 | 19 |
+| `--entropy-level` | zstd level 1–22. 19 encodes 15–30× slower; it makes gray lossless files no smaller, but RGB files ~4% and lossy files 3–12% smaller ([DESIGN.md §7.2](docs/DESIGN.md)) | 1 |
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
 | `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
 

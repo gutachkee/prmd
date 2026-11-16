@@ -18,7 +18,7 @@ A `.prmd` file always stores the coarsest level as pixels. The **mode** (`--mode
 - `laplacian` when lossy files must stay within a guaranteed per-pixel error, or when coarse levels should be Gaussian-smoothed.
 - `naive` only as the baseline.
 
-All numbers below come from the gray 4096² benchmark in [WRITEUP.md](WRITEUP.md) (5 levels, zstd, lossless unless noted).
+All numbers below come from the gray 4096² benchmark in [WRITEUP.md](WRITEUP.md) (5 levels, zstd at the default level 1, lossless unless noted).
 
 ## Options
 
@@ -34,7 +34,7 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 | `--tile` | `tile` | multiple of `cblk`, ≤ 32768 | 256 | tile size: the unit blocks are grouped by on disk and counted by in stats |
 | `--cblk` | `cblk` | even, 16–4096 | 128 | code-block size: the unit of decoding, I/O and caching |
 | `--entropy` | `entropy` | `zstd`, `range`, `raw` | `zstd` | coder for each block's numbers (below) |
-| `--entropy-level` | `entropy_level` | zstd: 1–22; others: 0 | 0 (= zstd 19) | zstd compression effort; affects encode time only. Level 3 encodes 13× faster (95 ms vs 1.23 s for gray `haar`) for files 0.1–0.3% larger, and crops decode at the same speed |
+| `--entropy-level` | `entropy_level` | zstd: 1–22; others: 0 | 0 (= zstd 1) | zstd compression effort; decode speed is the same at every level. Level 19 encodes 15–30× slower: it makes gray lossless files no smaller, but RGB files about 4% and lossy files 3–12% smaller |
 
 **Which options apply to which mode:**
 
@@ -45,8 +45,8 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 | `--quant` > 0 | open loop | open loop | closed loop | rejected |
 
 **Entropy coders** (gray, `haar`):
-- `zstd`: the default. 11.59 MiB, 0.61 ms per 256² crop.
-- `range`: a context-adaptive range coder. Files are 4–5% smaller (11.13 MiB), but decode is about 12× slower (7.2 ms).
+- `zstd`: the default. 11.58 MiB, 0.60 ms per 256² crop.
+- `range`: a context-adaptive range coder. Files are 4–5% smaller (11.13 MiB), but decode is about 12× slower (7.4 ms).
 - `raw`: uncompressed (32 MiB). Only useful for measuring transform cost.
 
 **Color.** With `rgb`, each channel gets the gray mode's filters independently. The stored values then go through the reversible YCoCg-R transform, so RGB stays bit-exact when lossless.
@@ -101,8 +101,8 @@ level 0 decodes to  [9, 13, 13, 17, 59, 63, 63, 67]     (exact: [10, 12, 14, 16,
 ```
 
 **Measured:**
-- Lossless: 11.59 MiB (−22.9% vs `naive`), 0.58 ms per 256² crop at L0.
-- Q = 4: 3.56 bits/px, 38.6 dB at L0, max error 12 (in 8-bit pixel values, 0–255).
+- Lossless: 11.58 MiB (−23.0% vs `naive`), 0.60 ms per 256² crop at L0.
+- Q = 4: 3.66 bits/px, 38.6 dB at L0, max error 12 (in 8-bit pixel values, 0–255).
 - Coarse levels alias a little, like any 2×2 mean.
 
 ```sh
@@ -138,8 +138,8 @@ stored  (d):  [0, −21, 0, 2]
 **Lossy:** the same rules as `haar`: open loop, LH/HL step Q, HH step 2Q, no per-pixel bound.
 
 **Measured:**
-- Lossless: 11.19 MiB (−25.6% vs `naive`), the smallest `.prmd` file. 0.75 ms per 256² crop at L0.
-- Q = 4: 3.41 bits/px, 41.9 dB, max error 11 (pixel values).
+- Lossless: 11.18 MiB (−25.7% vs `naive`), the smallest `.prmd` file. 0.80 ms per 256² crop at L0.
+- Q = 4: 3.53 bits/px, 41.9 dB, max error 11 (pixel values).
 - Its levels differ from the 2×2 mean by 24–28 dB PSNR, mostly a half-pixel shift.
 
 ```sh
@@ -178,8 +178,8 @@ Both store 8 numbers, where `haar` and `cdf53` store 4, and that's why the files
 
 **Measured:**
 - `gauss`, lossless: 14.29 MiB (−5.0% vs `naive`), 0.75 ms per 256² crop at L0.
-- `gauss`, Q = 4: 4.60 bits/px, 46.4 dB, **max error 2** (pixel values).
-- `box`, lossless: 14.42 MiB.
+- `gauss`, Q = 4: 4.72 bits/px, 46.4 dB, **max error 2** (pixel values).
+- `box`, lossless: 14.43 MiB.
 
 ```sh
 build/prmd encode in.jpg out.prmd --mode laplacian --down gauss
@@ -196,7 +196,7 @@ The task's baseline. Every level is downsampled with `--down` (`box` or `gauss`,
 
 **Lossy:** not supported. `--quant` > 0 is rejected.
 
-**Measured:** 15.04 MiB, 0.57 ms per 256² crop at L0.
+**Measured:** 15.04 MiB, 0.58 ms per 256² crop at L0.
 
 ```sh
 build/prmd encode in.jpg out.prmd --mode naive
@@ -228,4 +228,4 @@ The full 256² samples are in [`bench/samples/`](../bench/samples/). `prmdbench`
 - `--j2k-tile`: tile size, default 256.
 - `--j2k-lossy-psnr DB`: switches to the lossy 9/7 wavelet and aims for that PSNR.
 
-`--levels` and `--color` work as for `.prmd`, and the other options are ignored. JPEG2000 makes 6.5% smaller lossless files than `haar` (10.84 MiB), but crops are 15–25× slower, and coarse-level crops read most of the file. See [WRITEUP.md](WRITEUP.md).
+`--levels` and `--color` work as for `.prmd`, and the other options are ignored. JPEG2000 makes 6.4% smaller lossless files than `haar` (10.84 MiB), but crops are 14–26× slower, and coarse-level crops read most of the file. See [WRITEUP.md](WRITEUP.md).

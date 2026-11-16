@@ -53,7 +53,7 @@ struct EncodeOptions {
   int quant = 0;
   // Default: see DESIGN.md §7.1 (decision record).
   Entropy entropy = Entropy::Zstd;
-  // 0 = coder default. Zstd: 1..22 (default 19). Range, Raw: must be 0.
+  // 0 = coder default. Zstd: 1..22 (default 1). Range, Raw: must be 0.
   int entropy_level = 0;
 
   // J2K

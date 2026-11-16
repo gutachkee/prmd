@@ -89,13 +89,15 @@ std::vector<CodecSpec> all_specs(int levels, ColorFormat color) {
       prmd("naive", kNaive, kBox),
       j2k("j2k-t256", 256),
       j2k("j2k-t1024", 1024),
-      // Unsuffixed names use the default coder (zstd, level 19).
-      prmd("haar+zstd3", kHaar, kBox, Entropy::Zstd, 3),
+      // Unsuffixed names use the default coder (zstd, level 1); +zstd19 is
+      // the previous default, kept for comparison.
+      prmd("haar+zstd19", kHaar, kBox, Entropy::Zstd, 19),
       prmd("haar+range", kHaar, kBox, Entropy::Range),
       prmd("haar+raw", kHaar, kBox, Entropy::Raw),
-      prmd("cdf53+zstd3", kCdf53, kBox, Entropy::Zstd, 3),
+      prmd("cdf53+zstd19", kCdf53, kBox, Entropy::Zstd, 19),
       prmd("cdf53+range", kCdf53, kBox, Entropy::Range),
       prmd("cdf53+raw", kCdf53, kBox, Entropy::Raw),
+      prmd("naive+zstd19", kNaive, kBox, Entropy::Zstd, 19),
       prmd("naive+range", kNaive, kBox, Entropy::Range),
       prmd("naive+raw", kNaive, kBox, Entropy::Raw),
   };
@@ -106,9 +108,9 @@ const std::vector<std::string> kMainCodecs = {
     "naive", "j2k-t256", "j2k-t1024"};
 
 const std::vector<std::string> kEntropyCodecs = {
-    "haar",  "haar+zstd3",  "haar+range",  "haar+raw",
-    "cdf53", "cdf53+zstd3", "cdf53+range", "cdf53+raw",
-    "naive", "naive+range", "naive+raw"};
+    "haar",  "haar+zstd19",  "haar+range",  "haar+raw",
+    "cdf53", "cdf53+zstd19", "cdf53+range", "cdf53+raw",
+    "naive", "naive+zstd19", "naive+range", "naive+raw"};
 
 bool contains(const std::vector<std::string>& v, const std::string& s) {
   return std::find(v.begin(), v.end(), s) != v.end();
@@ -556,7 +558,7 @@ void latency_tables(Run& run, std::ostringstream& md) {
 }
 
 void entropy_table(Run& run, std::ostringstream& md) {
-  Table t{{"coder", "file size", "vs zstd19 (default)", "vs naive, same coder",
+  Table t{{"coder", "file size", "vs default (zstd 1)", "vs naive, same coder",
            "mean 256² L0", "p95 256² L0", "mean 512² L1"},
           {}};
 
