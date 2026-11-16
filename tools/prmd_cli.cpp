@@ -35,7 +35,7 @@ const char* kUsage = R"(usage:
               [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
               [--levels 5] [--tile 256] [--cblk 128] [--quant Q]
               [--entropy zstd|range|raw] [--entropy-level N]
-              [--no-med] [--no-ycocg]
+              [--no-med] [--no-ycocg] [--threads N]
               [--j2k-tile 256] [--j2k-lossy-psnr DB]
   prmd decode <file> --level L --x X --y Y --w W --h H -o crop.png [--clamp] [--stats]
   prmd info <file>
@@ -163,6 +163,10 @@ EncodeOptions parse_encode_options(const Args& a) {
   o.quant = a.num("quant", 0);
   o.entropy_level = a.num("entropy-level", 0);
   o.j2k_tile = a.num("j2k-tile", 256);
+  o.threads = a.num("threads", 0);
+  if (o.threads < 0) {
+    throw UsageError("--threads must be >= 0 (0 = one per hardware thread)");
+  }
 
   o.color = parse_choice<ColorFormat>(
       a, "color", "gray",
@@ -216,13 +220,14 @@ void print_report(const EncodeReport& r,
     }
   }
   std::printf("encode time     %.1f ms\n", r.encode_ms);
+  std::printf("threads         %d\n", r.threads);
 }
 
 int cmd_encode(int argc, char** argv) {
   Args a(argc, argv, 2, {"no-med", "no-ycocg"});
   a.check_known({"codec", "color", "mode", "down", "levels", "tile", "cblk",
                  "quant", "entropy", "entropy-level", "j2k-tile",
-                 "j2k-lossy-psnr"});
+                 "j2k-lossy-psnr", "threads"});
   if (a.pos.size() != 2) {
     throw UsageError("encode needs <in> <out>");
   }
