@@ -4,7 +4,14 @@
 // usage: prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096]
 //                  [--color gray|rgb|both] [--codecs a,b,...]
 //                  [--out <exe dir>/bench/results.md] [--workdir DIR]
-//                  [--no-entropy-table] [--lossy]
+//                  [--no-entropy-table] [--lossy] [--threads 1]
+//                  [--scaling 1,2,4,8,0]
+//
+// --threads N is EncodeOptions::threads for every encode (default 1, so the
+// encode times stay single-core and comparable with earlier reports; 0 = one
+// per hardware thread). Decoding is single-threaded. --scaling adds an
+// "Encode scaling" table: each --codecs codec encoded at every listed thread
+// count, with the speedup and a byte-identity check across counts.
 //
 // The naive-no-med / naive-no-ycocg / naive-no-med-no-ycocg codecs are the
 // naive mode with --no-med / --no-ycocg; they run only when --codecs names
@@ -311,6 +318,8 @@ struct Args {
   std::vector<std::string> codecs;
   bool entropy_table = true;
   bool lossy = false;
+  int threads = 1;           // EncodeOptions::threads for every encode
+  std::vector<int> scaling;  // thread counts for the scaling table
 };
 
 [[noreturn]] void die(const char* format, const std::string& arg) {
@@ -349,6 +358,20 @@ Args parse(int argc, char** argv) {
       a.entropy_table = false;
     } else if (s == "--lossy") {
       a.lossy = true;
+    } else if (s == "--threads") {
+      a.threads = std::stoi(next());
+      if (a.threads < 0) {
+        die("--threads must be >= 0, got %s\n", std::to_string(a.threads));
+      }
+    } else if (s == "--scaling") {
+      std::stringstream ss(next());
+      std::string n;
+      while (std::getline(ss, n, ',')) {
+        a.scaling.push_back(std::stoi(n));
+        if (a.scaling.back() < 0) {
+          die("--scaling: thread counts must be >= 0, got %s\n", n);
+        }
+      }
     } else if (s == "--codecs") {
       std::stringstream ss(next());
       std::string c;
@@ -369,7 +392,8 @@ Args parse(int argc, char** argv) {
                  "                 [--color gray|rgb|both] [--codecs a,b,...] "
                  "[--out <exe dir>/bench/results.md]\n"
                  "                 [--workdir DIR] [--no-entropy-table] "
-                 "[--lossy]\n");
+                 "[--lossy] [--threads 1]\n"
+                 "                 [--scaling 1,2,4,8,0]\n");
     std::exit(1);
   }
   if (a.codecs.empty()) {
@@ -501,7 +525,9 @@ void encode_all(Run& run) {
         (run.work / (spec.name + "_" + run.cname + ext)).string();
     std::fprintf(stderr, "[%s] encoding %s...\n", run.cname.c_str(),
                  spec.name.c_str());
-    run.rep[spec.name] = encode_file(run.img, p, spec.codec, spec.opt);
+    EncodeOptions o = spec.opt;
+    o.threads = run.args.threads;
+    run.rep[spec.name] = encode_file(run.img, p, spec.codec, o);
     run.path[spec.name] = p;
   }
 }
@@ -840,6 +866,7 @@ void lossy_table(Run& run, std::ostringstream& md) {
       EncodeOptions o =
           make_prmd_options(a.levels, run.color, m.t, m.d, m.e, m.level);
       o.quant = q;
+      o.threads = a.threads;
       const std::string p = (run.work / (std::string("lossy_") + m.name + "_q" +
                                          std::to_string(q) + ".prmd"))
                                 .string();
@@ -855,6 +882,7 @@ void lossy_table(Run& run, std::ostringstream& md) {
     EncodeOptions o = make_j2k_options(a.levels, run.color, 256);
     o.j2k_lossless = false;
     o.j2k_psnr = target;
+    o.threads = a.threads;
     const std::string p =
         (run.work / ("j2k_lossy_" + std::to_string(int(target)) + ".j2k"))
             .string();
@@ -874,6 +902,74 @@ void lossy_table(Run& run, std::ostringstream& md) {
      << t.str() << "\n";
 }
 
+// Encode time of every --codecs codec at each --scaling thread count, and
+// whether the files are byte-identical across counts.
+void scaling_table(Run& run, std::ostringstream& md) {
+  const auto& counts = run.args.scaling;
+  std::vector<std::string> head = {"codec"};
+  for (const int n : counts) {
+    head.push_back(n == 0 ? "auto" : "N=" + std::to_string(n));
+  }
+  head.push_back("speedup");
+  head.push_back("identical");
+  Table t{head, {}};
+
+  for (const auto& spec : all_specs(run.args.levels, run.color)) {
+    if (!contains(run.args.codecs, spec.name)) {
+      continue;
+    }
+    const std::string ext = spec.codec == Codec::J2K ? ".j2k" : ".prmd";
+    std::vector<std::string> row = {spec.name};
+    std::vector<char> first_file;
+    bool identical = true;
+    double first_ms = 0;
+    double last_ms = 0;
+    for (size_t k = 0; k < counts.size(); ++k) {
+      EncodeOptions o = spec.opt;
+      o.threads = counts[k];
+      const std::string p =
+          (run.work / ("scaling_" + spec.name + "_" + run.cname + ext))
+              .string();
+      std::fprintf(stderr, "[%s] scaling %s threads %d...\n",
+                   run.cname.c_str(), spec.name.c_str(), counts[k]);
+      // Median of 3 encodes (1 when an encode takes over 3 s).
+      std::vector<double> times;
+      EncodeReport r;
+      for (int rep = 0; rep < 3; ++rep) {
+        r = encode_file(run.img, p, spec.codec, o);
+        times.push_back(r.encode_ms);
+        if (r.encode_ms > 3000) {
+          break;
+        }
+      }
+      std::sort(times.begin(), times.end());
+      const double t_ms = times[times.size() / 2];
+      std::ifstream f(p, std::ios::binary);
+      std::vector<char> bytes((std::istreambuf_iterator<char>(f)), {});
+      if (k == 0) {
+        first_file = std::move(bytes);
+        first_ms = t_ms;
+      } else if (bytes != first_file) {
+        identical = false;
+      }
+      last_ms = t_ms;
+      row.push_back(fmt("%.0f ms", t_ms) +
+                    (r.threads != counts[k] ? " (" + std::to_string(r.threads) +
+                                                  " used)"
+                                            : ""));
+      fs::remove(p);
+    }
+    row.push_back(fmt("%.2f×", first_ms / last_ms));
+    row.push_back(identical ? "yes" : "**NO**");
+    t.rows.push_back(row);
+  }
+  md << "### Encode scaling (encode_file wall time, median of 3)\n\n"
+     << "Speedup: first column over the last. \"(k used)\": the encoder "
+        "used k threads (J2K: at most one per 4 code-blocks of a tile; "
+        "auto: one per hardware thread).\n\n"
+     << t.str() << "\n";
+}
+
 void run_color(const Args& a,
                ColorFormat color,
                const Image& source,
@@ -886,6 +982,9 @@ void run_color(const Args& a,
 
   encode_all(run);
   file_size_table(run, md);
+  if (!a.scaling.empty()) {
+    scaling_table(run, md);
+  }
   level_bytes_table(run, md);
 
   for (const auto& [n, p] : run.path) {
@@ -920,6 +1019,11 @@ int main(int argc, char** argv) {
      << "\n";
   md << "- CPU: " << cpu_model() << ", " << sysconf(_SC_NPROCESSORS_ONLN)
      << " cores (single-threaded decode)\n";
+  md << "- encode threads: "
+     << (a.threads == 0 ? std::string("one per hardware thread")
+                        : std::to_string(a.threads))
+     << " (EncodeOptions::threads; the encode column of the file size "
+        "table)\n";
   md << "- build: " << __VERSION__ << ", " << PRMD_BUILD_DESC << "\n";
   md << "- seed " << a.seed << ", " << a.iters
      << " crops per latency row, file in page cache\n";

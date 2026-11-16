@@ -19,11 +19,18 @@
 // Each number is the median over --runs runs. The timers add a little time,
 // so take totals from a build without them and shares from a build with them.
 //
+// --threads N is EncodeOptions::threads (default 1: a serial encode, as in
+// docs/pipeline_durations.md; 0 = one per hardware thread). With N > 1 the
+// steps that run on pool workers (per block, per row stripe) report time
+// summed over all threads, so they can add up to more than their parent's
+// wall time; the "on workers" column gives the part measured on worker
+// threads (include/prmd/profile.h, "Threads").
+//
 // usage: prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive]
 //          [--down box|gauss] [--color gray|rgb] [--quant Q]
 //          [--entropy zstd|range|raw] [--entropy-level N] [--tile 256]
 //          [--cblk 128] [--cache-mib 0] [--runs 5] [--file out.prmd]
-//          [--label text]
+//          [--label text] [--threads 1]
 
 #include <algorithm>
 #include <chrono>
@@ -75,7 +82,8 @@ struct Options {
                "         [--color gray|rgb] [--quant Q] [--entropy "
                "zstd|range|raw] [--entropy-level N]\n"
                "         [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] "
-               "[--file out.prmd] [--label text]\n",
+               "[--file out.prmd] [--label text]\n"
+               "         [--threads 1]\n",
                why.c_str());
   std::exit(1);
 }
@@ -83,6 +91,7 @@ struct Options {
 Options parse(int argc, char** argv) {
   Options o;
   o.enc.levels = 6;
+  o.enc.threads = 1;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a.rfind("--", 0) != 0) {
@@ -140,6 +149,11 @@ Options parse(int argc, char** argv) {
       o.file = v;
     } else if (a == "--label") {
       o.label = v;
+    } else if (a == "--threads") {
+      o.enc.threads = std::stoi(v);
+      if (o.enc.threads < 0) {
+        usage("--threads must be >= 0");
+      }
     } else {
       usage("unknown option " + a);
     }
@@ -187,6 +201,7 @@ struct CropResult {
 struct Run {
   double load_ms = 0, encode_ms = 0, open_ms = 0;
   uint64_t file_bytes = 0;
+  int threads = 1;
   std::vector<CropResult> crops;
   std::vector<profile::Entry> profile;
 };
@@ -203,6 +218,7 @@ Run run_once(const Options& o, std::vector<Crop>& plan) {
   const EncodeReport rep = encode_file(img, o.file, Codec::Prmd, o.enc);
   run.encode_ms = ms_since(t0);
   run.file_bytes = rep.file_bytes;
+  run.threads = rep.threads;
 
   DecoderOptions dopt;
   dopt.cache_bytes = o.cache_bytes;
@@ -264,18 +280,21 @@ struct Row {
   int depth;
   uint64_t calls;
   double ms;
+  double worker_ms = 0;  // part of ms measured on pool worker threads
 };
 
 std::vector<Row> median_tree(const std::vector<Run>& runs) {
-  std::map<std::string, std::vector<double>> ms;
+  std::map<std::string, std::vector<double>> ms, worker_ms;
   for (const Run& r : runs) {
     for (const auto& e : r.profile) {
       ms[e.path].push_back(e.ms);
+      worker_ms[e.path].push_back(e.worker_ms);
     }
   }
   std::vector<Row> rows;
   for (const auto& e : runs.front().profile) {
-    rows.push_back({e.path, e.name, e.depth, e.calls, median(ms[e.path])});
+    rows.push_back({e.path, e.name, e.depth, e.calls, median(ms[e.path]),
+                    median(worker_ms[e.path])});
   }
 
   // Copies rows[i] and its subtree to `out`, then the parent's uncovered
@@ -285,12 +304,14 @@ std::vector<Row> median_tree(const std::vector<Run>& runs) {
     const Row& r = rows[i];
     out.push_back(r);
     double children = 0;
+    bool parallel = false;  // a child summed over threads: no "(other)"
     size_t j = i + 1;
     while (j < rows.size() && rows[j].depth > r.depth) {
       children += rows[j].ms;  // rows[j] is a direct child
+      parallel = parallel || rows[j].worker_ms > 0;
       j = emit(j);
     }
-    if (j > i + 1 && r.ms - children >= 0.01 * r.ms) {
+    if (j > i + 1 && !parallel && r.ms - children >= 0.01 * r.ms) {
       out.push_back(
           {r.path + "/(other)", "(other)", r.depth + 1, 0, r.ms - children});
     }
@@ -374,8 +395,11 @@ int main(int argc, char** argv) {
   const double mib = double(runs.front().file_bytes) / (1 << 20);
 
   std::printf("## %s\n\n", o.label.empty() ? o.input.c_str() : o.label.c_str());
-  std::printf("timers: %s · runs: %d (median) · file: %.2f MiB\n\n",
-              profile::kEnabled ? "on (PRMD_PROFILE)" : "off", o.runs, mib);
+  const int threads = runs.front().threads;
+  std::printf(
+      "timers: %s · runs: %d (median) · file: %.2f MiB · encode threads: "
+      "%d\n\n",
+      profile::kEnabled ? "on (PRMD_PROFILE)" : "off", o.runs, mib, threads);
 
   std::printf("| step | ms |\n|---|---:|\n");
   std::printf("| load_image | %s |\n", fmt_ms(load).c_str());
@@ -415,8 +439,17 @@ int main(int argc, char** argv) {
   }
 
   const std::vector<Row> rows = median_tree(runs);
+  if (threads > 1) {
+    std::printf(
+        "ms: wall time for steps on the calling thread; steps that also ran "
+        "on the %d - 1 pool workers add up the time of every thread (so "
+        "they can exceed their parent). on workers: the part of ms measured "
+        "on worker threads.\n\n",
+        threads);
+  }
   std::printf(
-      "| step | calls | ms | share of parent |\n|---|---:|---:|---:|\n");
+      "| step | calls | ms | share of parent | on workers |\n"
+      "|---|---:|---:|---:|---:|\n");
   for (size_t i = 0; i < rows.size(); ++i) {
     const Row& r = rows[i];
     double parent = 0;
@@ -426,11 +459,12 @@ int main(int argc, char** argv) {
         break;
       }
     }
-    std::printf("| %s%s | %s | %s | %s |\n", indent(r.depth).c_str(),
+    std::printf("| %s%s | %s | %s | %s | %s |\n", indent(r.depth).c_str(),
                 r.name.c_str(),
                 r.calls ? std::to_string(r.calls).c_str() : "",
                 fmt_ms(r.ms).c_str(),
-                r.depth ? pct(r.ms, parent).c_str() : "");
+                r.depth ? pct(r.ms, parent).c_str() : "",
+                r.worker_ms > 0 ? pct(r.worker_ms, r.ms).c_str() : "");
   }
   std::printf("\n");
   std::fprintf(stderr, "SUMMARY\t%s\t%.2f\t%.1f\t%.2f\t%s\t%s\n",
