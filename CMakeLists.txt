@@ -105,6 +105,7 @@ if(PRMD_BUILD_TESTS)
     tests/test_lossy.cpp
     tests/test_cli.cpp
     tests/test_parallel.cpp
+    tests/test_threads.cpp
     tests/reference.cpp
   )
   add_executable(prmd_tests ${PRMD_TEST_SOURCES})
@@ -114,4 +115,21 @@ if(PRMD_BUILD_TESTS)
   target_compile_definitions(prmd_tests PRIVATE PRMD_CLI_PATH="$<TARGET_FILE:prmd>")
   include(GoogleTest)
   gtest_discover_tests(prmd_tests DISCOVERY_TIMEOUT 60)
+
+  # Profiler tests need the PRMD_TIMED timers compiled in: without
+  # PRMD_PROFILE they link a second, profiled copy of the core.
+  if(PRMD_PROFILE)
+    set(PRMD_PROFILED_CORE prmd_core)
+  else()
+    add_library(prmd_core_profiled STATIC EXCLUDE_FROM_ALL ${PRMD_CORE_SOURCES})
+    target_include_directories(prmd_core_profiled PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(prmd_core_profiled PUBLIC JPEG::JPEG PNG::PNG PkgConfig::ZSTD
+                          PkgConfig::OPENJP2 Threads::Threads)
+    target_compile_definitions(prmd_core_profiled PUBLIC PRMD_PROFILE)
+    set(PRMD_PROFILED_CORE prmd_core_profiled)
+  endif()
+  add_executable(prmd_profile_tests tests/test_profile.cpp tests/reference.cpp)
+  target_link_libraries(prmd_profile_tests PRIVATE ${PRMD_PROFILED_CORE} GTest::gtest
+                        GTest::gtest_main)
+  gtest_discover_tests(prmd_profile_tests DISCOVERY_TIMEOUT 60)
 endif()

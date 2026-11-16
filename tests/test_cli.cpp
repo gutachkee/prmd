@@ -200,3 +200,34 @@ TEST(Cli, IoAndFormatErrors) {
   testutil::write_file(bad, bytes);
   EXPECT_EQ(run_cli(decode_args(bad, "0", "0", "0", "8", "8", out)), 3);
 }
+
+TEST(Cli, ThreadsOption) {
+  const CliFiles& f = files();
+  const std::string out = testutil::temp_path("cli_threads.prmd").string();
+  for (const char* bad : {"-1", "abc", "1.5", "", "4x", "99999999999"}) {
+    EXPECT_EQ(run_cli({"encode", f.png, out, "--threads", bad}), 1)
+        << "--threads '" << bad << "'";
+  }
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--threads"}), 1);  // no value
+
+  // Every accepted count writes the file of --threads 1.
+  const std::string serial = testutil::temp_path("cli_t1.prmd").string();
+  ASSERT_EQ(run_cli({"encode", f.png, serial, "--levels", "3", "--mode",
+                     "cdf53", "--cblk", "32", "--tile", "64", "--threads",
+                     "1"}),
+            0);
+  const auto expected = testutil::read_file(serial);
+  ASSERT_FALSE(expected.empty());
+  for (const char* n : {"0", "2", "3", "16", "1000"}) {
+    ASSERT_EQ(run_cli({"encode", f.png, out, "--levels", "3", "--mode",
+                       "cdf53", "--cblk", "32", "--tile", "64", "--threads",
+                       n}),
+              0)
+        << n;
+    EXPECT_EQ(testutil::read_file(out), expected) << "--threads " << n;
+  }
+  // J2K takes it too.
+  EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("t.j2k").string(),
+                     "--codec", "j2k", "--levels", "3", "--threads", "4"}),
+            0);
+}
