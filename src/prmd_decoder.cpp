@@ -368,7 +368,7 @@ class PrmdDecoder final : public CropDecoder {
       if (h_.med) {
         PRMD_TIMED("med_reconstruct");
         for (int c = 0; c < channels_; ++c) {
-          std::vector<int32_t> px(n);
+          Samples px = uninitialized_samples(n);  // written entirely
           med_reconstruct(bp.planes[first + size_t(c)].data(), samples.w,
                           samples.h, px.data());
           bp.planes[first + size_t(c)].swap(px);

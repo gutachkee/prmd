@@ -51,8 +51,8 @@ struct EncodedBlocks {
 // code-blocks), not kept for the thread's lifetime.
 constexpr size_t kMaxKeptScratch = size_t(8) << 20;
 
-std::vector<int32_t> extract(const Region& plane, const Rect& r) {
-  std::vector<int32_t> out(size_t(r.w) * size_t(r.h));
+Samples extract(const Region& plane, const Rect& r) {
+  Samples out = uninitialized_samples(size_t(r.w) * size_t(r.h));
   for (int y = 0; y < r.h; ++y) {
     const int32_t* src = plane.row(r.y + y) + (r.x - plane.rect.x);
     std::memcpy(out.data() + size_t(y) * size_t(r.w), src,
@@ -316,14 +316,14 @@ BlockPlanes make_block(const Planes& stored,
     bp.w = pixels.w;
     bp.h = pixels.h;
     for (int c = 0; c < channels; ++c) {
-      std::vector<int32_t> px;
+      Samples px;
       {
         PRMD_TIMED("extract");
         px = extract(stored[size_t(c)], pixels);
       }
       if (med) {
         PRMD_TIMED("med_residual");
-        std::vector<int32_t> res(px.size());
+        Samples res = uninitialized_samples(px.size());
         med_residual(px.data(), pixels.w, pixels.h, res.data());
         px.swap(res);
       }

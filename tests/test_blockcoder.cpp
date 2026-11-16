@@ -28,7 +28,7 @@ BlockPlanes make_planes(int w,
   for (Band b : band_kinds) {
     for (int c = 0; c < channels; ++c) {
       bp.kinds.push_back(b);
-      std::vector<int32_t> p(size_t(w) * size_t(h));
+      Samples p(size_t(w) * size_t(h));
       for (auto& v : p) {
         if (laplacian_dist) {
           const int m = G(rng);

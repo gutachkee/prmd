@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "prmd/encoder.h"
+#include "prmd/internal/region.h"
 #include "prmd/internal/transform.h"
 
 namespace prmd::internal {
@@ -19,7 +20,7 @@ struct BlockPlanes {
   int w = 0, h = 0;
   int channels = 1;
   std::vector<Band> kinds;                   // one per plane
-  std::vector<std::vector<int32_t>> planes;  // each w*h, row-major
+  std::vector<Samples> planes;  // each w*h, row-major
 };
 
 // Pluggable entropy coder for one code-block. All adaptive state is created

@@ -37,7 +37,11 @@ std::vector<Region> to_planes(const Image& img,
   }
   const int in_ch = img.channels();
   const int out_ch = channels(stored);
-  std::vector<Region> planes(size_t(out_ch), Region(img.bounds()));
+  // Every sample is written below, by the thread that owns its row.
+  std::vector<Region> planes;
+  for (int c = 0; c < out_ch; ++c) {
+    planes.emplace_back(img.bounds(), kNoInit);
+  }
   const size_t w = size_t(img.width);
 
   parallel_rows(pool, img.height, img.width * (in_ch + out_ch), [&](int y0,

@@ -101,7 +101,11 @@ void pack(const BlockPlanes& in, std::vector<uint8_t>& buf) {
 void unpack(const uint8_t* buf, BlockPlanes& io) {
   PRMD_TIMED("unpack");
   const size_t n = samples_per_plane(io);
-  io.planes.assign(io.kinds.size(), std::vector<int32_t>(n));
+  // Every sample is written below.
+  io.planes.clear();
+  for (size_t k = 0; k < io.kinds.size(); ++k) {
+    io.planes.push_back(uninitialized_samples(n));
+  }
 
   for (auto& plane : io.planes) {
     for (size_t i = 0; i < n; ++i) {

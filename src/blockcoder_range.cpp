@@ -220,7 +220,11 @@ class RangeBlockCoder final : public BlockCoder {
     Models models;
     RangeDecoder dec(data, size);
     const size_t n = size_t(io.w) * size_t(io.h);
-    io.planes.assign(io.kinds.size(), std::vector<int32_t>(n));
+    // Every sample is written below, also for a truncated payload.
+    io.planes.clear();
+    for (size_t k = 0; k < io.kinds.size(); ++k) {
+      io.planes.push_back(uninitialized_samples(n));
+    }
 
     for (size_t pi = 0; pi < io.planes.size(); ++pi) {
       Model& m = model_for_plane(models, io, pi);

@@ -27,8 +27,9 @@ Dims dims_of(const Region& plane) {
   return Dims{plane.rect.w, plane.rect.h};
 }
 
-Region whole_plane(Dims d) {
-  return Region(Rect{0, 0, d.w, d.h});
+// A whole plane the caller writes entirely (no zero-fill; see NoInit).
+Region whole_plane_uninit(Dims d) {
+  return Region(Rect{0, 0, d.w, d.h}, kNoInit);
 }
 
 // Sample of a whole plane with edge replication (used for padding odd dims to
@@ -89,10 +90,14 @@ class HaarTransform final : public WaveletTransform {
                std::vector<Region>& bands,
                Pool* pool) const override {
     const Dims c = half_up(dims_of(fine));
-    coarse = whole_plane(c);
-    bands.assign(3, whole_plane(c));
+    coarse = whole_plane_uninit(c);
+    bands.clear();
+    for (int b = 0; b < 3; ++b) {
+      bands.push_back(whole_plane_uninit(c));
+    }
 
-    // Coarse row j depends on fine rows 2j, 2j+1 only.
+    // Coarse row j depends on fine rows 2j, 2j+1 only. Every sample of
+    // coarse and bands is written below.
     parallel_rows(pool, c.h, 8 * c.w, [&](int j0, int j1) {
       for (int j = j0; j < j1; ++j) {
         for (int i = 0; i < c.w; ++i) {
@@ -219,8 +224,9 @@ class Cdf53Transform final : public WaveletTransform {
 
     // Horizontal pass: rows → L (horizontal low) and H (horizontal high), each
     // c.w wide and ph tall. Rows are independent.
-    std::vector<int32_t> lo_rows(cw * size_t(ph));
-    std::vector<int32_t> hi_rows(cw * size_t(ph));
+    // Both written entirely by this pass.
+    Samples lo_rows = uninitialized_samples(cw * size_t(ph));
+    Samples hi_rows = uninitialized_samples(cw * size_t(ph));
     parallel_rows(pool, ph, 2 * pw, [&](int y0, int y1) {
       std::vector<int32_t> line(static_cast<size_t>(pw));
       std::vector<int32_t> s(cw);
@@ -241,7 +247,7 @@ class Cdf53Transform final : public WaveletTransform {
     // Same integer formulas as fwd53() with n = ph, m = c.h: first every d
     // (high) row, then every s (low) row, which needs d rows j-1 and j. Rows
     // inside each of the two steps are independent.
-    auto vertical = [&](const std::vector<int32_t>& rows, Region& lo,
+    auto vertical = [&](const Samples& rows, Region& lo,
                         Region& hi) {
       auto in = [&](int y) { return rows.data() + size_t(y) * cw; };
       parallel_rows(pool, c.h, 3 * c.w, [&](int j0, int j1) {
@@ -268,8 +274,12 @@ class Cdf53Transform final : public WaveletTransform {
       });
     };
 
-    coarse = whole_plane(c);
-    bands.assign(3, whole_plane(c));
+    // Every sample is written by vertical().
+    coarse = whole_plane_uninit(c);
+    bands.clear();
+    for (int b = 0; b < 3; ++b) {
+      bands.push_back(whole_plane_uninit(c));
+    }
     vertical(lo_rows, coarse, bands[0]);    // L → LL, LH
     vertical(hi_rows, bands[1], bands[2]);  // H → HL, HH
   }
@@ -377,8 +387,9 @@ void upsample(Downsampler down,
   const Dims c = half_up(fine);
   const Rect K = coarse_support(r, fine);
 
-  // Horizontal pass over the needed coarse rows.
-  Region tmp(Rect{r.x, K.y, r.w, K.h});
+  // Horizontal pass over the needed coarse rows. Both passes write every
+  // sample of tmp and out.
+  Region tmp(Rect{r.x, K.y, r.w, K.h}, kNoInit);
   parallel_rows(pool, K.h, 2 * r.w, [&](int k0, int k1) {
     for (int j = K.y + k0; j < K.y + k1; ++j) {
       for (int x = r.x; x < r.right(); ++x) {
@@ -389,7 +400,7 @@ void upsample(Downsampler down,
   });
 
   // Vertical pass.
-  out = Region(r);
+  out = Region(r, kNoInit);
   parallel_rows(pool, r.h, 2 * r.w, [&](int y0, int y1) {
     for (int y = r.y + y0; y < r.y + y1; ++y) {
       for (int x = r.x; x < r.right(); ++x) {
@@ -420,7 +431,8 @@ class LaplacianTransform final : public LevelTransform {
     Region up;
     upsample(down_, coarse, fine.rect, dims_of(fine), up, pool);
 
-    bands.assign(1, Region(fine.rect));
+    bands.clear();
+    bands.push_back(Region(fine.rect, kNoInit));  // written entirely below
     parallel_samples(pool, fine.v.size(), [&](size_t b, size_t e) {
       for (size_t i = b; i < e; ++i) {
         bands[0].v[i] = fine.v[i] - up.v[i];
@@ -481,7 +493,7 @@ void copy_overlap(const Region& src, Region& dst) {
 
 Region downsample_box(const Region& fine, Pool* pool) {
   const Dims c = half_up(dims_of(fine));
-  Region out = whole_plane(c);
+  Region out = whole_plane_uninit(c);  // every sample written below
 
   parallel_rows(pool, c.h, 5 * c.w, [&](int j0, int j1) {
     for (int j = j0; j < j1; ++j) {
@@ -503,7 +515,7 @@ Region downsample_gauss(const Region& fine, Pool* pool) {
   const Dims c = half_up(Dims{fw, fh});
 
   // Horizontal pass: c.w columns, every fine row.
-  Region tmp(Rect{0, 0, c.w, fh});
+  Region tmp(Rect{0, 0, c.w, fh}, kNoInit);  // every sample written
   parallel_rows(pool, fh, 6 * c.w, [&](int y0, int y1) {
     for (int y = y0; y < y1; ++y) {
       for (int i = 0; i < c.w; ++i) {
@@ -517,7 +529,7 @@ Region downsample_gauss(const Region& fine, Pool* pool) {
   });
 
   // Vertical pass and normalization by 16 × 16.
-  Region out = whole_plane(c);
+  Region out = whole_plane_uninit(c);
   parallel_rows(pool, c.h, 6 * c.w, [&](int j0, int j1) {
     for (int j = j0; j < j1; ++j) {
       for (int i = 0; i < c.w; ++i) {
