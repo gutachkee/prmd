@@ -20,6 +20,7 @@
 
 #include "prmd/errors.h"
 #include "prmd/internal/blockcoder.h"
+#include "prmd/internal/output_file.h"
 #include "prmd/internal/parallel.h"
 #include "prmd/internal/planes.h"
 #include "prmd/internal/prmd_format.h"
@@ -602,15 +603,13 @@ std::vector<LevelEntry> level_table(const std::vector<LevelGeom>& geom) {
 }
 
 // Header + index, then the payloads in order, written as they are (no
-// concatenated copy of the data section).
+// concatenated copy of the data section), into a temporary file that
+// replaces `path` only once everything is written (output_file.h).
 void write_file(const std::string& path,
                 const std::vector<uint8_t>& head,
                 const std::vector<std::vector<uint8_t>>& payloads) {
-  FILE* f = std::fopen(path.c_str(), "wb");
-  if (!f) {
-    throw IoError("cannot create '" + path + "'");
-  }
-  std::setvbuf(f, nullptr, _IOFBF, size_t(1) << 20);
+  OutputFile file(path);
+  FILE* f = file.stream();
   bool ok = std::fwrite(head.data(), 1, head.size(), f) == head.size();
   for (const auto& p : payloads) {
     if (!ok) {
@@ -618,10 +617,10 @@ void write_file(const std::string& path,
     }
     ok = p.empty() || std::fwrite(p.data(), 1, p.size(), f) == p.size();
   }
-  const bool closed = std::fclose(f) == 0;
-  if (!ok || !closed) {
-    throw IoError("write failed for '" + path + "'");
+  if (!ok) {
+    file.fail();
   }
+  file.commit();
 }
 
 }  // namespace

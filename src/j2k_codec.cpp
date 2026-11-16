@@ -27,6 +27,7 @@
 
 #include "prmd/errors.h"
 #include "prmd/internal/file.h"
+#include "prmd/internal/output_file.h"
 #include "prmd/internal/parallel.h"
 #include "prmd/internal/timing.h"
 
@@ -406,6 +407,50 @@ void validate_j2k_options(const EncodeOptions& o) {
   validate_threads(o.threads);
 }
 
+// Encoder output: OpenJPEG writes through these callbacks into the
+// temporary file of an OutputFile (so write errors are seen, which the
+// default file stream ignores when it closes the file).
+struct WriteSink {
+  int fd = -1;
+  bool error = false;
+};
+
+OPJ_SIZE_T sink_write(void* buf, OPJ_SIZE_T n, void* user) {
+  auto* s = static_cast<WriteSink*>(user);
+  const auto* p = static_cast<const uint8_t*>(buf);
+  OPJ_SIZE_T done = 0;
+  while (done < n) {
+    const ssize_t r = ::write(s->fd, p + done, n - done);
+    if (r < 0 && errno == EINTR) {
+      continue;
+    }
+    if (r <= 0) {
+      s->error = true;
+      return OPJ_SIZE_T(-1);
+    }
+    done += OPJ_SIZE_T(r);
+  }
+  return done;
+}
+
+OPJ_OFF_T sink_skip(OPJ_OFF_T n, void* user) {
+  auto* s = static_cast<WriteSink*>(user);
+  if (::lseek(s->fd, off_t(n), SEEK_CUR) < 0) {
+    s->error = true;
+    return -1;
+  }
+  return n;
+}
+
+OPJ_BOOL sink_seek(OPJ_OFF_T n, void* user) {
+  auto* s = static_cast<WriteSink*>(user);
+  if (::lseek(s->fd, off_t(n), SEEK_SET) < 0) {
+    s->error = true;
+    return OPJ_FALSE;
+  }
+  return OPJ_TRUE;
+}
+
 // Automatic thread count (EncodeOptions::threads = 0): auto_threads of the
 // work, measured like the .prmd encoder's (parallel.h). An OpenJPEG sample
 // costs about 18 work units serially (lossless or lossy), but each thread of
@@ -519,24 +564,30 @@ EncodeReport encode_j2k(const Image& src_in,
     threads = 1;
   }
 
-  StreamPtr stream(
-      opj_stream_create_default_file_stream(path.c_str(), OPJ_FALSE));
+  // Into a temporary file that replaces `path` only when complete.
+  OutputFile file(path);
+  WriteSink sink{file.fd(), false};
+  StreamPtr stream(opj_stream_create(OPJ_J2K_STREAM_CHUNK_SIZE, OPJ_FALSE));
   if (!stream) {
-    throw IoError("cannot create '" + path + "'");
+    throw std::runtime_error("opj_stream_create failed");
   }
-  if (!opj_start_compress(codec.get(), img.get(), stream.get()) ||
-      !opj_encode(codec.get(), stream.get()) ||
-      !opj_end_compress(codec.get(), stream.get())) {
+  opj_stream_set_user_data(stream.get(), &sink, nullptr);
+  opj_stream_set_write_function(stream.get(), sink_write);
+  opj_stream_set_skip_function(stream.get(), sink_skip);
+  opj_stream_set_seek_function(stream.get(), sink_seek);
+  const bool encoded = opj_start_compress(codec.get(), img.get(), stream.get()) &&
+                       opj_encode(codec.get(), stream.get()) &&
+                       opj_end_compress(codec.get(), stream.get());
+  stream.reset();
+  if (sink.error) {
+    throw IoError("write failed for '" + path + "'");
+  }
+  if (!encoded) {
     throw std::runtime_error("J2K encode failed: " + msgs.last_error);
   }
-  stream.reset();  // flush + close
 
-  struct stat st;
-  if (::stat(path.c_str(), &st) != 0) {
-    throw IoError("cannot stat '" + path + "'");
-  }
   EncodeReport report;
-  report.file_bytes = uint64_t(st.st_size);
+  report.file_bytes = file.commit();
   report.encode_ms = elapsed_ms(start);
   report.threads = threads;
   return report;

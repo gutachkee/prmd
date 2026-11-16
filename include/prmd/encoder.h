@@ -93,7 +93,9 @@ struct EncodeReport {
 };
 
 // Throws std::invalid_argument for bad options, prmd::IoError on write
-// failure.
+// failure. The file is written to a temporary file next to out_path and
+// renamed over it when complete: on any failure an existing out_path is left
+// as it was (design.md §1.4, "Errors").
 EncodeReport encode_file(const Image& src,
                          const std::string& out_path,
                          Codec codec,

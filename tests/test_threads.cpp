@@ -1,16 +1,24 @@
 // Multithreaded encoding (EncodeOptions::threads, design.md §1.4):
 //   * golden hashes pin the serial encoder's output to that of commit fc0a629
 //     (before threading) for every case of tests/thread_matrix.h;
-//   * every thread count (2, 3, 7, 16, 0 = hardware, more threads than
+//   * every thread count (2, 3, 7, 16, 0 = automatic, more threads than
 //     blocks) writes the same bytes as threads = 1;
-//   * thread-count resolution, EncodeReport::threads, option validation;
-//   * row-parallel transforms equal their serial versions;
+//   * thread-count resolution, the automatic count, EncodeReport::threads,
+//     option validation, the fewer-threads fallback;
+//   * row-parallel transforms equal their serial versions and run on
+//     worker threads;
 //   * multithreaded files decode exactly; concurrent encodes are independent;
-//   * failures: the same exception at every thread count, no output file;
+//   * failures: the same exception (also the data-size limit) at every
+//     thread count, no output file, an existing file untouched even when the
+//     write itself fails;
 //   * J2K output is identical across thread counts.
 
 #include <gtest/gtest.h>
 
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -27,6 +35,7 @@
 
 #include "prmd/crop_decoder.h"
 #include "prmd/encoder.h"
+#include "prmd/errors.h"
 #include "prmd/internal/blockcoder.h"
 #include "prmd/internal/parallel.h"
 #include "prmd/internal/planes.h"
@@ -896,6 +905,21 @@ class FailingCoder final : public internal::BlockCoder {
   mutable std::atomic<int> calls_{0};
 };
 
+// Files in the test directory whose names start with `name` + ".tmp."
+// (temporary files of the encoder's output_file.h).
+std::vector<std::string> temp_files_of(const std::string& name) {
+  std::vector<std::string> out;
+  const std::string prefix = name + ".tmp.";
+  for (const auto& e : std::filesystem::directory_iterator(
+           testutil::temp_path("x").parent_path())) {
+    const std::string n = e.path().filename().string();
+    if (n.compare(0, prefix.size(), prefix) == 0) {
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
 // Encodes `c` with `coder` at `threads` (data section limited to
 // `max_data`); returns the exception message (empty if none) and checks
 // that no file was left behind.
@@ -919,6 +943,7 @@ std::string failing_encode(const Case& c,
     EXPECT_FALSE(std::filesystem::exists(path))
         << "partial output left behind at threads " << threads;
   }
+  EXPECT_TRUE(temp_files_of("fail.prmd").empty()) << "threads " << threads;
   std::filesystem::remove(path);
   return msg;
 }
@@ -977,6 +1002,8 @@ TEST(ThreadsErrors, FailureInTheLastLevelStillWins) {
 }
 
 TEST(ThreadsErrors, ExistingFileIsLeftUntouched) {
+  // A failure while coding: the file is never opened. (Failures of the
+  // write itself: ThreadsErrors.WriteFailureLeavesTheExistingFileIntact.)
   const Case c = case_named("cdf53_300x200_gray");
   const std::string path = testutil::temp_path("keep.prmd").string();
   const std::vector<char> old = {'o', 'l', 'd'};
@@ -988,6 +1015,95 @@ TEST(ThreadsErrors, ExistingFileIsLeftUntouched) {
     EXPECT_THROW(internal::encode_prmd(source_of(c), path, o, &coder),
                  std::runtime_error);
     EXPECT_EQ(testutil::read_file(path), old) << n;
+    EXPECT_TRUE(temp_files_of("keep.prmd").empty()) << n;
+  }
+}
+
+namespace {
+
+// Runs `fn` in a forked child whose file-size limit is `limit` bytes, with
+// SIGXFSZ ignored so that a write past it fails (EFBIG) instead of killing
+// the process; returns the child's exit status (fn's result), -1 if it did
+// not exit normally.
+int in_child_with_file_size_limit(rlim_t limit, int (*fn)(const char*),
+                                  const char* arg) {
+  std::fflush(nullptr);
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    const struct rlimit rl = {limit, limit};
+    ::signal(SIGXFSZ, SIG_IGN);
+    if (::setrlimit(RLIMIT_FSIZE, &rl) != 0) {
+      ::_exit(90);
+    }
+    ::_exit(fn(arg));
+  }
+  int status = 0;
+  if (pid < 0 || ::waitpid(pid, &status, 0) != pid) {
+    return -2;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// 0: the encode failed with IoError "write failed for"; else a code naming
+// what happened instead.
+int encode_expecting_write_failure(const char* path, Codec codec, int threads) {
+  const Case c = case_named("haar_1000x777_rgb");
+  EncodeOptions o = c.opts;
+  o.threads = threads;
+  try {
+    encode_file(source_of(c), path, codec, o);
+  } catch (const IoError& e) {
+    return std::string(e.what()).find("write failed for") == 0 ? 0 : 11;
+  } catch (...) {
+    return 12;
+  }
+  return 13;  // no error
+}
+
+int prmd_serial(const char* p) {
+  return encode_expecting_write_failure(p, Codec::Prmd, 1);
+}
+int prmd_threads(const char* p) {
+  return encode_expecting_write_failure(p, Codec::Prmd, 4);
+}
+int j2k_auto(const char* p) {
+  return encode_expecting_write_failure(p, Codec::J2K, 0);
+}
+
+}  // namespace
+
+TEST(ThreadsErrors, WriteFailureLeavesTheExistingFileIntact) {
+  // The write itself fails part-way (file-size limit, as with a full disk):
+  // the file being replaced keeps its old contents and no temporary file is
+  // left behind.
+  const std::vector<char> old = {'o', 'l', 'd', '\n'};
+  struct Run {
+    const char* name;
+    int (*fn)(const char*);
+  };
+  for (const Run r : {Run{"wf_serial.prmd", prmd_serial},
+                      Run{"wf_threads.prmd", prmd_threads},
+                      Run{"wf.j2k", j2k_auto}}) {
+    const std::string path = testutil::temp_path(r.name).string();
+    testutil::write_file(path, old);
+    // 64 KiB: the encoded file is far larger.
+    EXPECT_EQ(in_child_with_file_size_limit(64 << 10, r.fn, path.c_str()), 0)
+        << r.name;
+    EXPECT_EQ(testutil::read_file(path), old) << r.name;
+    EXPECT_TRUE(temp_files_of(r.name).empty()) << r.name;
+    // Without the limit the same encode replaces the file.
+    std::filesystem::remove(path);
+    testutil::write_file(path, old);
+    const Case c = case_named("haar_1000x777_rgb");
+    const Codec codec = std::string(r.name).find(".j2k") != std::string::npos
+                            ? Codec::J2K
+                            : Codec::Prmd;
+    const EncodeReport rep = encode_file(source_of(c), path, codec, c.opts);
+    EXPECT_EQ(std::filesystem::file_size(path), rep.file_bytes) << r.name;
+    if (codec == Codec::Prmd) {
+      EXPECT_EQ(file_hash(path), golden().at(c.name));
+    }
+    EXPECT_TRUE(temp_files_of(r.name).empty()) << r.name;
   }
 }
 

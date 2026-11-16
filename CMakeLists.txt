@@ -65,6 +65,7 @@ set(PRMD_CORE_SOURCES
   src/j2k_codec.cpp
   src/profile.cpp
   src/parallel.cpp
+  src/output_file.cpp
 )
 
 add_library(prmd_core STATIC ${PRMD_CORE_SOURCES})
@@ -106,6 +107,7 @@ if(PRMD_BUILD_TESTS)
     tests/test_cli.cpp
     tests/test_parallel.cpp
     tests/test_threads.cpp
+    tests/test_output_file.cpp
     tests/reference.cpp
   )
   add_executable(prmd_tests ${PRMD_TEST_SOURCES})
