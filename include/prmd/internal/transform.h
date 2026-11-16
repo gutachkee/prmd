@@ -6,6 +6,10 @@
 // All planes are int32 and addressed in their own plane coordinates (origin
 // 0,0). Fine level dims (fw, fh) are the true level dims; Haar and Cdf53
 // internally pad to even dims by replicating the last column/row.
+//
+// Encoder-side functions take an optional Pool (prmd/internal/parallel.h):
+// with one, they split their rows over its threads; the result is the same
+// integers for every pool size and for no pool.
 
 #include <memory>
 #include <vector>
@@ -14,6 +18,8 @@
 #include "prmd/internal/region.h"
 
 namespace prmd::internal {
+
+class Pool;
 
 enum class Band : uint8_t { Base = 0, LH = 1, HL = 2, HH = 3, Residual = 4 };
 constexpr int kNumBandKinds = 5;
@@ -42,7 +48,8 @@ class LevelTransform {
   // half_up(fine)) and the full bands (dims band_size(fine)).
   virtual void forward(const Region& fine,
                        Region& coarse,
-                       std::vector<Region>& bands) const = 0;
+                       std::vector<Region>& bands,
+                       Pool* pool = nullptr) const = 0;
 
   // Decoder: coarse / band samples needed to reconstruct fine rect r, clipped
   // to the planes.
@@ -93,12 +100,22 @@ std::unique_ptr<LevelTransform> make_transform(Transform t, Downsampler d);
 // half_up(input dims).
 
 // (a+b+c+d+2)>>2, last row/col replicated.
-Region downsample_box(const Region& fine);
+Region downsample_box(const Region& fine, Pool* pool = nullptr);
 
 // [1 4 6 4 1]/16 separable, reflect-101, (s+128)>>8.
-Region downsample_gauss(const Region& fine);
+Region downsample_gauss(const Region& fine, Pool* pool = nullptr);
 
 // Dispatches to downsample_box or downsample_gauss.
-Region downsample(const Region& fine, Downsampler d);
+Region downsample(const Region& fine, Downsampler d, Pool* pool = nullptr);
+
+// Laplacian prediction U(coarse) of a whole fine plane of dims `fine` from
+// the whole coarse plane (dims half_up(fine)), with the upsampler phase-
+// matched to `d`. Equal to the Laplacian LevelTransform's inverse() over the
+// whole plane with an all-zero residual.
+void laplacian_upsample(Downsampler d,
+                        const Region& coarse,
+                        Dims fine,
+                        Region& out,
+                        Pool* pool = nullptr);
 
 }  // namespace prmd::internal

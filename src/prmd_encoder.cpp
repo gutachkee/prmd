@@ -1,14 +1,23 @@
 // .prmd encoder (design.md §3–§5).
+//
+// Threads (design.md §1.4): with more than one thread, one Pool lives for the
+// duration of encode_prmd. Every stage splits pure work over it (rows of a
+// level, runs of samples, code-blocks) and each piece writes its own slot,
+// so the file is byte-identical for every thread count. With one thread
+// there is no pool and each helper runs its loop once on the calling thread.
 
 #include "prmd/internal/prmd_codec.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
 #include "prmd/errors.h"
 #include "prmd/internal/blockcoder.h"
+#include "prmd/internal/parallel.h"
 #include "prmd/internal/planes.h"
 #include "prmd/internal/prmd_format.h"
 #include "prmd/internal/timing.h"
@@ -29,12 +38,18 @@ struct Decomposition {
   std::vector<std::vector<Planes>> bands;  // [level][channel][band]; haar, cdf53 only
 };
 
-// Blocks encoded back to back, plus their index.
+// Encoded blocks and their index.
 struct EncodedBlocks {
   std::vector<uint32_t> offsets;  // total_blocks + 1 entries
-  std::vector<uint8_t> data;
+  // One payload per present block, in block-id (= file) order.
+  std::vector<std::vector<uint8_t>> payloads;
+  uint64_t data_bytes = 0;  // sum of the payload sizes
   std::array<uint64_t, kMaxLevels> level_bytes{};
 };
+
+// Per-thread coder scratch above this capacity is released after use (huge
+// code-blocks), not kept for the thread's lifetime.
+constexpr size_t kMaxKeptScratch = size_t(8) << 20;
 
 std::vector<int32_t> extract(const Region& plane, const Rect& r) {
   std::vector<int32_t> out(size_t(r.w) * size_t(r.h));
@@ -48,53 +63,57 @@ std::vector<int32_t> extract(const Region& plane, const Rect& r) {
 
 // YCoCg-R on planes[first .. first+2]; no-op unless `ycocg` is set and there
 // are 3 channels.
-void color_forward(Planes& p, size_t first, int channels, bool ycocg) {
+void color_forward(Planes& p,
+                   size_t first,
+                   int channels,
+                   bool ycocg,
+                   Pool* pool) {
   if (ycocg && channels == 3) {
-    ycocg_r_forward(p[first].v.data(), p[first + 1].v.data(),
-                    p[first + 2].v.data(), p[first].v.size());
+    int32_t* c0 = p[first].v.data();
+    int32_t* c1 = p[first + 1].v.data();
+    int32_t* c2 = p[first + 2].v.data();
+    parallel_samples(pool, p[first].v.size(), [&](size_t b, size_t e) {
+      ycocg_r_forward(c0 + b, c1 + b, c2 + b, e - b);
+    });
   }
 }
 
-void color_inverse(Planes& p, size_t first, int channels, bool ycocg) {
-  if (ycocg && channels == 3) {
-    ycocg_r_inverse(p[first].v.data(), p[first + 1].v.data(),
-                    p[first + 2].v.data(), p[first].v.size());
+// Quantizes the `channels` planes starting at `first`. Step <= 1 is the
+// identity (lossless), so the loop is skipped.
+void quantize_planes(Planes& p,
+                     size_t first,
+                     int channels,
+                     int step,
+                     Pool* pool) {
+  if (step <= 1) {
+    return;
   }
-}
-
-// Quantizes / dequantizes the `channels` planes starting at `first`.
-void quantize_planes(Planes& p, size_t first, int channels, int step) {
   for (int c = 0; c < channels; ++c) {
-    for (auto& v : p[first + size_t(c)].v) {
-      v = quantize(v, step);
-    }
+    int32_t* v = p[first + size_t(c)].v.data();
+    parallel_samples(pool, p[first + size_t(c)].v.size(),
+                     [&](size_t b, size_t e) {
+                       for (size_t i = b; i < e; ++i) {
+                         v[i] = quantize(v[i], step);
+                       }
+                     });
   }
 }
 
-void dequantize_planes(Planes& p, size_t first, int channels, int step) {
-  for (int c = 0; c < channels; ++c) {
-    for (auto& v : p[first + size_t(c)].v) {
-      v = dequantize(v, step);
-    }
-  }
-}
-
-// 1. Level planes and detail bands of the exact pyramid. `wavelet` is null
-// when the levels are plain downsamples and no bands are needed: for
-// Transform::Independent, and for Transform::Laplacian, whose residuals
-// store_laplacian_residuals takes against the reconstructed coarser level.
-Decomposition decompose(const Image& src,
+// 1. Level planes and detail bands of the exact pyramid, from the level-0
+// planes. `wavelet` is null when the levels are plain downsamples and no
+// bands are needed: for Transform::Independent, and for
+// Transform::Laplacian, whose residuals store_laplacian_residuals takes
+// against the reconstructed coarser level.
+Decomposition decompose(Planes level0,
                         int num_levels,
                         const LevelTransform* wavelet,
-                        Downsampler down) {
-  const int channels = src.channels();
+                        Downsampler down,
+                        Pool* pool) {
+  const int channels = int(level0.size());
   Decomposition out;
   out.levels.resize(size_t(num_levels));
   out.bands.resize(size_t(num_levels));
-  {
-    PRMD_TIMED("to_planes");
-    out.levels[0] = to_planes(src);
-  }
+  out.levels[0] = std::move(level0);
 
   for (int level = 0; level + 1 < num_levels; ++level) {
     out.bands[size_t(level)].resize(size_t(channels));
@@ -103,10 +122,11 @@ Decomposition decompose(const Image& src,
       Region coarse;
       if (wavelet) {
         PRMD_TIMED("forward");
-        wavelet->forward(fine, coarse, out.bands[size_t(level)][size_t(c)]);
+        wavelet->forward(fine, coarse, out.bands[size_t(level)][size_t(c)],
+                         pool);
       } else {
         PRMD_TIMED("downsample");
-        coarse = downsample(fine, down);
+        coarse = downsample(fine, down, pool);
       }
       out.levels[size_t(level + 1)].push_back(std::move(coarse));
     }
@@ -115,102 +135,127 @@ Decomposition decompose(const Image& src,
 }
 
 // Haar / Cdf53: each detail level stores its bands, band-major, after
-// YCoCg-R and quantization (open loop).
-void store_wavelet_bands(const Decomposition& pyr,
+// YCoCg-R and quantization (open loop). The bands are moved out of `pyr`.
+void store_wavelet_bands(Decomposition& pyr,
                          const LevelTransform& xf,
                          int channels,
                          int quant,
                          bool ycocg,
-                         std::vector<Planes>& stored) {
+                         std::vector<Planes>& stored,
+                         Pool* pool) {
   const int num_levels = int(pyr.levels.size());
   for (int level = 0; level + 1 < num_levels; ++level) {
     Planes& dst = stored[size_t(level)];
     for (int b = 0; b < xf.num_bands(); ++b) {
       {
-        PRMD_TIMED("copy_bands");
+        PRMD_TIMED("move_bands");
         for (int c = 0; c < channels; ++c) {
-          dst.push_back(pyr.bands[size_t(level)][size_t(c)][size_t(b)]);
+          dst.push_back(
+              std::move(pyr.bands[size_t(level)][size_t(c)][size_t(b)]));
         }
       }
       const size_t first = size_t(b * channels);
       {
         PRMD_TIMED("ycocg_forward");
-        color_forward(dst, first, channels, ycocg);
+        color_forward(dst, first, channels, ycocg, pool);
       }
       {
         PRMD_TIMED("quantize");
         quantize_planes(dst, first, channels,
-                        band_step(xf.band_kind(b), quant));
+                        band_step(xf.band_kind(b), quant), pool);
       }
     }
+    Planes().swap(pyr.levels[size_t(level)]);  // no longer needed
   }
 }
 
 // Laplacian, closed loop from the coarsest level down: residuals are taken
 // against the *reconstructed* coarser level (exactly what the decoder will
-// have), so quantization errors never accumulate.
-void store_laplacian_residuals(const Decomposition& pyr,
+// have), so quantization errors never accumulate. Consumes the exact detail
+// levels of `pyr` (the residual is computed in their place).
+void store_laplacian_residuals(Decomposition& pyr,
                                const std::vector<LevelGeom>& geom,
-                               const LevelTransform& xf,
+                               Downsampler down,
                                int channels,
                                int quant,
                                bool ycocg,
-                               std::vector<Planes>& stored) {
+                               std::vector<Planes>& stored,
+                               Pool* pool) {
   const int num_levels = int(pyr.levels.size());
   const int step = band_step(Band::Residual, quant);
+  const bool color = ycocg && channels == 3;
   Planes recon = pyr.levels[size_t(num_levels - 1)];  // base is lossless
 
   for (int level = num_levels - 2; level >= 0; --level) {
-    const Rect full{0, 0, geom[size_t(level)].w, geom[size_t(level)].h};
-    const Dims fd{full.w, full.h};
-    const Planes& exact = pyr.levels[size_t(level)];
+    const Dims fd{geom[size_t(level)].w, geom[size_t(level)].h};
 
-    // Residual = exact level − U(recon).
+    // Prediction U(recon): the decoder's inverse() with a zero residual.
     Planes pred(static_cast<size_t>(channels));
-    Planes res(static_cast<size_t>(channels));
-    for (int c = 0; c < channels; ++c) {
-      {
-        PRMD_TIMED("predict_upsample");
-        const Planes zero{Region(full)};
-        xf.inverse(recon[size_t(c)], zero, full, fd, pred[size_t(c)]);
-      }
-      PRMD_TIMED("subtract");
-      res[size_t(c)] = Region(full);
-      for (size_t i = 0; i < res[size_t(c)].v.size(); ++i) {
-        res[size_t(c)].v[i] = exact[size_t(c)].v[i] - pred[size_t(c)].v[i];
+    {
+      PRMD_TIMED("predict_upsample");
+      for (int c = 0; c < channels; ++c) {
+        laplacian_upsample(down, recon[size_t(c)], fd, pred[size_t(c)], pool);
       }
     }
 
+    // Per sample, in one pass: residual = exact − U(recon) → YCoCg-R →
+    // quantize (what is stored); then reconstruct exactly as the decoder
+    // will, dequantize → inverse YCoCg-R → + U(recon), into `pred`.
+    Planes res = std::move(pyr.levels[size_t(level)]);
     {
-      PRMD_TIMED("ycocg_forward");
-      color_forward(res, 0, channels, ycocg);
+      PRMD_TIMED("residual_reconstruct");
+      int32_t* r[3] = {};
+      int32_t* p[3] = {};
+      for (int c = 0; c < channels; ++c) {
+        r[c] = res[size_t(c)].v.data();
+        p[c] = pred[size_t(c)].v.data();
+      }
+      parallel_samples(pool, res[0].v.size(), [&](size_t b, size_t e) {
+        for (int c = 0; c < channels; ++c) {
+          for (size_t i = b; i < e; ++i) {
+            r[c][i] -= p[c][i];
+          }
+        }
+        if (color) {
+          ycocg_r_forward(r[0] + b, r[1] + b, r[2] + b, e - b);
+        }
+        if (step > 1) {
+          for (int c = 0; c < channels; ++c) {
+            for (size_t i = b; i < e; ++i) {
+              r[c][i] = quantize(r[c][i], step);
+            }
+          }
+        }
+        if (!color && step <= 1) {
+          for (int c = 0; c < channels; ++c) {
+            for (size_t i = b; i < e; ++i) {
+              p[c][i] += r[c][i];
+            }
+          }
+          return;
+        }
+        constexpr size_t kRun = 1024;
+        int32_t t[3][kRun];
+        for (size_t i0 = b; i0 < e; i0 += kRun) {
+          const size_t len = std::min(kRun, e - i0);
+          for (int c = 0; c < channels; ++c) {
+            for (size_t k = 0; k < len; ++k) {
+              t[c][k] = dequantize(r[c][i0 + k], step);
+            }
+          }
+          if (color) {
+            ycocg_r_inverse(t[0], t[1], t[2], len);
+          }
+          for (int c = 0; c < channels; ++c) {
+            for (size_t k = 0; k < len; ++k) {
+              p[c][i0 + k] += t[c][k];
+            }
+          }
+        }
+      });
     }
-    {
-      PRMD_TIMED("quantize");
-      quantize_planes(res, 0, channels, step);
-    }
-    {
-      PRMD_TIMED("copy_residuals");
-      stored[size_t(level)] = res;
-    }
-
-    // Reconstruct exactly as the decoder will: dequantize → inverse color →
-    // U(recon) + residual.
-    {
-      PRMD_TIMED("dequantize");
-      dequantize_planes(res, 0, channels, step);
-    }
-    {
-      PRMD_TIMED("ycocg_inverse");
-      color_inverse(res, 0, channels, ycocg);
-    }
-    PRMD_TIMED("reconstruct_upsample");
-    Planes next(static_cast<size_t>(channels));
-    for (int c = 0; c < channels; ++c) {
-      const Planes band{res[size_t(c)]};
-      xf.inverse(recon[size_t(c)], band, full, fd, next[size_t(c)]);
-    }
-    recon = std::move(next);
+    stored[size_t(level)] = std::move(res);
+    recon = std::move(pred);
   }
 }
 
@@ -220,32 +265,35 @@ void store_laplacian_residuals(const Decomposition& pyr,
 //    Detail levels: bands → YCoCg-R (RGB, unless off) → quantize. Both steps are per
 //    sample, so doing them on whole planes is identical to doing them per
 //    block.
-std::vector<Planes> stored_planes(const Decomposition& pyr,
+// Consumes `pyr`.
+std::vector<Planes> stored_planes(Decomposition& pyr,
                                   const std::vector<LevelGeom>& geom,
                                   const LevelTransform* xf,
                                   const EncodeOptions& opts,
-                                  int channels) {
+                                  int channels,
+                                  Pool* pool) {
   const int num_levels = int(pyr.levels.size());
   std::vector<Planes> stored(static_cast<size_t>(num_levels));
+
+  if (opts.transform == Transform::Laplacian) {
+    // First: it starts from the exact base level, moved out below.
+    PRMD_TIMED("laplacian_residuals");
+    store_laplacian_residuals(pyr, geom, opts.downsampler, channels,
+                              opts.quant, opts.ycocg, stored, pool);
+  }
 
   for (int level = num_levels - 1; level >= 0; --level) {
     if (geom[size_t(level)].base) {
       PRMD_TIMED("copy_base");
-      stored[size_t(level)] = pyr.levels[size_t(level)];
-      color_forward(stored[size_t(level)], 0, channels, opts.ycocg);
+      stored[size_t(level)] = std::move(pyr.levels[size_t(level)]);
+      color_forward(stored[size_t(level)], 0, channels, opts.ycocg, pool);
     }
   }
 
-  if (!xf) {
-    return stored;  // Independent: every level is a base level
-  }
-  if (opts.transform == Transform::Laplacian) {
-    PRMD_TIMED("laplacian_residuals");
-    store_laplacian_residuals(pyr, geom, *xf, channels, opts.quant,
-                              opts.ycocg, stored);
-  } else {
+  if (xf && opts.transform != Transform::Laplacian) {
     PRMD_TIMED("wavelet_bands");
-    store_wavelet_bands(pyr, *xf, channels, opts.quant, opts.ycocg, stored);
+    store_wavelet_bands(pyr, *xf, channels, opts.quant, opts.ycocg, stored,
+                        pool);
   }
   return stored;
 }
@@ -298,8 +346,11 @@ BlockPlanes make_block(const Planes& stored,
   return bp;
 }
 
-// 3. Entropy-codes every block, coarsest level first, in block-id order.
-// Ids of absent edge blocks get empty payloads.
+// 3. Entropy-codes every present block into its own exact-size payload.
+// Blocks are pure functions of the stored planes, so they are coded in any
+// order on any thread; payloads and offsets are then laid out in block-id
+// order (coarsest level first). Ids of absent edge blocks get empty
+// payloads.
 EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
                             const std::vector<LevelGeom>& geom,
                             const LevelTransform* xf,
@@ -307,52 +358,90 @@ EncodedBlocks encode_blocks(const std::vector<Planes>& stored,
                             uint32_t total_blocks,
                             int cblk,
                             int channels,
-                            bool med) {
-  EncodedBlocks out;
-  out.offsets.assign(size_t(total_blocks) + 1, 0);
+                            bool med,
+                            Pool* pool) {
   const int num_levels = int(geom.size());
 
+  struct Job {
+    int level;
+    int bx;
+    int by;
+    uint32_t id;
+  };
+  std::vector<Job> jobs;
   for (int level = num_levels - 1; level >= 0; --level) {
     const LevelGeom& g = geom[size_t(level)];
-    const size_t level_start = out.data.size();
     const int k2 = g.k * g.k;
-
     for (uint32_t local = 0; local < g.num_ids; ++local) {
       // Inverse of block_id(): tile-major, then row-major inside the tile.
       const int tile = int(local) / k2;
       const int in_tile = int(local) % k2;
       const int bx = (tile % g.tiles_x) * g.k + in_tile % g.k;
       const int by = (tile / g.tiles_x) * g.k + in_tile / g.k;
-      const uint32_t id = g.first_block + local;
-
       if (bx < g.blocks_x && by < g.blocks_y) {
-        BlockPlanes bp;
-        {
-          PRMD_TIMED("make_block");
-          bp = make_block(stored[size_t(level)], g, xf, cblk, channels, med,
-                          bx, by);
-        }
-        PRMD_TIMED("entropy_encode");
-        coder.encode(bp, out.data);
-        if (out.data.size() > 0xFFFFFFFFull) {
+        jobs.push_back(Job{level, bx, by, g.first_block + local});
+      }
+    }
+  }
+
+  EncodedBlocks out;
+  out.payloads.resize(jobs.size());
+  parallel_for(pool, jobs.size(), 1, [&](size_t b, size_t e) {
+    // Coders append to (and may over-allocate) this per-thread buffer;
+    // the payload keeps an exact-size copy.
+    thread_local std::vector<uint8_t> scratch;
+    for (size_t i = b; i < e; ++i) {
+      const Job& j = jobs[i];
+      BlockPlanes bp;
+      {
+        PRMD_TIMED("make_block");
+        bp = make_block(stored[size_t(j.level)], geom[size_t(j.level)], xf,
+                        cblk, channels, med, j.bx, j.by);
+      }
+      PRMD_TIMED("entropy_encode");
+      scratch.clear();
+      coder.encode(bp, scratch);
+      out.payloads[i].assign(scratch.begin(), scratch.end());
+    }
+    if (scratch.capacity() > kMaxKeptScratch) {
+      std::vector<uint8_t>().swap(scratch);
+    }
+  });
+
+  // Index, in id order.
+  out.offsets.assign(size_t(total_blocks) + 1, 0);
+  uint64_t pos = 0;
+  size_t ji = 0;
+  for (int level = num_levels - 1; level >= 0; --level) {
+    const LevelGeom& g = geom[size_t(level)];
+    const uint64_t level_start = pos;
+    for (uint32_t local = 0; local < g.num_ids; ++local) {
+      const uint32_t id = g.first_block + local;
+      if (ji < jobs.size() && jobs[ji].id == id) {
+        pos += out.payloads[ji].size();
+        ++ji;
+        if (pos > 0xFFFFFFFFull) {
           throw std::runtime_error("encoded data exceeds 4 GiB");
         }
       }
-      out.offsets[size_t(id) + 1] = uint32_t(out.data.size());
+      out.offsets[size_t(id) + 1] = uint32_t(pos);
     }
-    out.level_bytes[size_t(level)] = out.data.size() - level_start;
+    out.level_bytes[size_t(level)] = pos - level_start;
   }
+  out.data_bytes = pos;
   return out;
 }
 
 PrmdHeader make_header(const EncodeOptions& opts,
-                       const Image& src,
+                       int width,
+                       int height,
+                       int channels,
                        uint32_t total_blocks) {
   PrmdHeader h;
   h.transform = opts.transform;
   h.downsampler = opts.downsampler;
-  h.width = uint32_t(src.width);
-  h.height = uint32_t(src.height);
+  h.width = uint32_t(width);
+  h.height = uint32_t(height);
   h.levels = uint8_t(opts.levels);
   h.color = opts.color;
   h.tile = uint16_t(opts.tile);
@@ -364,7 +453,7 @@ PrmdHeader make_header(const EncodeOptions& opts,
   h.med = opts.med;
   // Gray has no color transform; recording "off" would give one image two
   // encodings.
-  h.ycocg = opts.ycocg || src.channels() != 3;
+  h.ycocg = opts.ycocg || channels != 3;
   return h;
 }
 
@@ -378,15 +467,23 @@ std::vector<LevelEntry> level_table(const std::vector<LevelGeom>& geom) {
   return table;
 }
 
+// Header + index, then the payloads in order, written as they are (no
+// concatenated copy of the data section).
 void write_file(const std::string& path,
                 const std::vector<uint8_t>& head,
-                const std::vector<uint8_t>& data) {
+                const std::vector<std::vector<uint8_t>>& payloads) {
   FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) {
     throw IoError("cannot create '" + path + "'");
   }
-  const bool ok = std::fwrite(head.data(), 1, head.size(), f) == head.size() &&
-                  std::fwrite(data.data(), 1, data.size(), f) == data.size();
+  std::setvbuf(f, nullptr, _IOFBF, size_t(1) << 20);
+  bool ok = std::fwrite(head.data(), 1, head.size(), f) == head.size();
+  for (const auto& p : payloads) {
+    if (!ok) {
+      break;
+    }
+    ok = p.empty() || std::fwrite(p.data(), 1, p.size(), f) == p.size();
+  }
   const bool closed = std::fclose(f) == 0;
   if (!ok || !closed) {
     throw IoError("write failed for '" + path + "'");
@@ -421,40 +518,60 @@ void validate_prmd_options(const EncodeOptions& o) {
   }
   (void)make_block_coder(o.entropy, o.entropy_level);  // entropy + level
   (void)info(o.color);
+  if (o.threads < 0) {
+    throw std::invalid_argument(
+        "threads must be >= 0 (0 = one per hardware thread)");
+  }
 }
 
-EncodeReport encode_prmd(const Image& src_in,
+EncodeReport encode_prmd(const Image& src,
                          const std::string& path,
-                         const EncodeOptions& opts) {
+                         const EncodeOptions& opts,
+                         const BlockCoder* coder_override) {
   PRMD_TIMED("encode_prmd");
   const auto start = Clock::now();
   validate_prmd_options(opts);
-  if (src_in.width <= 0 || src_in.height <= 0) {
+  if (src.width <= 0 || src.height <= 0) {
     throw std::invalid_argument("empty source image");
   }
   if (const char* why =
-          geometry_error(uint64_t(src_in.width), uint64_t(src_in.height),
+          geometry_error(uint64_t(src.width), uint64_t(src.height),
                          opts.levels, opts.tile, opts.cblk)) {
     throw std::invalid_argument(std::string("image geometry: ") + why);
   }
-
-  Image src;
-  {
-    PRMD_TIMED("convert");
-    src = convert(src_in, opts.color);
-  }
-  const int channels = src.channels();
+  const int channels = prmd::channels(opts.color);
 
   std::unique_ptr<LevelTransform> xf;
   if (opts.transform != Transform::Independent) {
     xf = make_transform(opts.transform, opts.downsampler);
   }
 
-  const auto geom = make_geometry(src.width, src.height, opts.levels, opts.tile,
-                                  opts.cblk, opts.transform);
+  const auto geom = make_geometry(src.width, src.height, opts.levels,
+                                  opts.tile, opts.cblk, opts.transform);
   uint32_t total_blocks = 0;
+  uint64_t present_blocks = 0;
   for (const LevelGeom& g : geom) {
     total_blocks += g.num_ids;
+    present_blocks += uint64_t(g.blocks_x) * uint64_t(g.blocks_y);
+  }
+
+  // Threads: never more than there are blocks, the unit of the dominant
+  // stage (an image with one block gets no pool). One thread: no pool, every
+  // stage runs inline on this thread.
+  const int threads = int(std::min<uint64_t>(
+      uint64_t(resolve_threads(opts.threads)), std::max<uint64_t>(present_blocks, 1)));
+  std::unique_ptr<Pool> pool_owner;
+  if (threads > 1) {
+    pool_owner = std::make_unique<Pool>(threads);
+  }
+  Pool* pool = pool_owner.get();
+  const int threads_used = pool ? pool->size() : 1;
+
+  // Level 0 planes straight from the source, converted to opts.color.
+  Planes level0;
+  {
+    PRMD_TIMED("convert");
+    level0 = to_planes(src, opts.color, pool);
   }
 
   // Laplacian levels are the same downsample its forward() would compute;
@@ -464,23 +581,31 @@ EncodeReport encode_prmd(const Image& src_in,
   Decomposition pyr;
   {
     PRMD_TIMED("decompose");
-    pyr = decompose(src, opts.levels, wavelet, opts.downsampler);
+    pyr = decompose(std::move(level0), opts.levels, wavelet, opts.downsampler,
+                    pool);
   }
   std::vector<Planes> stored;
   {
     PRMD_TIMED("stored_planes");
-    stored = stored_planes(pyr, geom, xf.get(), opts, channels);
+    stored = stored_planes(pyr, geom, xf.get(), opts, channels, pool);
   }
 
-  const auto coder = make_block_coder(opts.entropy, opts.entropy_level);
+  std::unique_ptr<BlockCoder> own_coder;
+  if (!coder_override) {
+    own_coder = make_block_coder(opts.entropy, opts.entropy_level);
+  }
+  const BlockCoder& coder = coder_override ? *coder_override : *own_coder;
   EncodedBlocks blocks;
   {
     PRMD_TIMED("encode_blocks");
-    blocks = encode_blocks(stored, geom, xf.get(), *coder, total_blocks,
-                           opts.cblk, channels, opts.med);
+    blocks = encode_blocks(stored, geom, xf.get(), coder, total_blocks,
+                           opts.cblk, channels, opts.med, pool);
   }
+  std::vector<Planes>().swap(stored);
+  pool_owner.reset();  // all parallel work is done
 
-  PrmdHeader header = make_header(opts, src, total_blocks);
+  PrmdHeader header =
+      make_header(opts, src.width, src.height, channels, total_blocks);
   std::vector<uint8_t> head;
   {
     PRMD_TIMED("serialize");
@@ -488,13 +613,14 @@ EncodeReport encode_prmd(const Image& src_in,
   }
   {
     PRMD_TIMED("write_file");
-    write_file(path, head, blocks.data);
+    write_file(path, head, blocks.payloads);
   }
 
   EncodeReport report;
   report.level_bytes = blocks.level_bytes;
-  report.file_bytes = head.size() + blocks.data.size();
+  report.file_bytes = head.size() + blocks.data_bytes;
   report.encode_ms = elapsed_ms(start);
+  report.threads = threads_used;
   return report;
 }
 

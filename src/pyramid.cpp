@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "prmd/internal/parallel.h"
 #include "prmd/internal/planes.h"
 #include "prmd/internal/transform.h"
 
@@ -21,6 +22,52 @@ std::vector<Region> to_planes(const Image& img) {
       }
     }
   }
+  return planes;
+}
+
+std::vector<Region> to_planes(const Image& img,
+                              ColorFormat stored,
+                              Pool* pool) {
+  const bool to_gray =
+      img.format == ColorFormat::RGB8 && stored == ColorFormat::Gray8;
+  const bool to_rgb =
+      img.format == ColorFormat::Gray8 && stored == ColorFormat::RGB8;
+  if (img.format != stored && !to_gray && !to_rgb) {
+    throw std::invalid_argument("convert: unsupported format pair");
+  }
+  const int in_ch = img.channels();
+  const int out_ch = channels(stored);
+  std::vector<Region> planes(size_t(out_ch), Region(img.bounds()));
+  const size_t w = size_t(img.width);
+
+  parallel_rows(pool, img.height, img.width * (in_ch + out_ch), [&](int y0,
+                                                                    int y1) {
+    for (int y = y0; y < y1; ++y) {
+      const uint8_t* src = img.row(y);
+      if (img.format == stored) {
+        for (int c = 0; c < out_ch; ++c) {
+          int32_t* dst = planes[size_t(c)].row(y);
+          for (size_t x = 0; x < w; ++x) {
+            dst[x] = src[x * size_t(in_ch) + size_t(c)];
+          }
+        }
+      } else if (to_gray) {
+        // convert(): BT.601 luma, rounded.
+        int32_t* dst = planes[0].row(y);
+        for (size_t x = 0; x < w; ++x) {
+          const uint8_t* s = src + 3 * x;
+          dst[x] = uint8_t((77u * s[0] + 150u * s[1] + 29u * s[2] + 128u) >> 8);
+        }
+      } else {  // to_rgb: gray replicated into R, G, B
+        for (int c = 0; c < 3; ++c) {
+          int32_t* dst = planes[size_t(c)].row(y);
+          for (size_t x = 0; x < w; ++x) {
+            dst[x] = src[x];
+          }
+        }
+      }
+    }
+  });
   return planes;
 }
 

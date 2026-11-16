@@ -42,6 +42,23 @@ ZSTD_DCtx* thread_dctx() {
   return ctx.get();
 }
 
+// Per-thread buffer for the packed stream of encode(), reused across blocks
+// (one allocation per thread instead of one per block). Released after use
+// when a huge code-block grew it past kMaxKeptPack.
+constexpr size_t kMaxKeptPack = size_t(8) << 20;
+
+std::vector<uint8_t>& pack_scratch() {
+  thread_local std::vector<uint8_t> buf;
+  return buf;
+}
+
+void trim_pack_scratch() {
+  std::vector<uint8_t>& buf = pack_scratch();
+  if (buf.capacity() > kMaxKeptPack) {
+    std::vector<uint8_t>().swap(buf);
+  }
+}
+
 inline uint32_t zigzag_encode(int32_t v) {
   return (uint32_t(v) << 1) ^ uint32_t(v >> 31);
 }
@@ -99,9 +116,10 @@ class RawBlockCoder final : public BlockCoder {
   Entropy id() const override { return Entropy::Raw; }
 
   void encode(const BlockPlanes& in, std::vector<uint8_t>& out) const override {
-    std::vector<uint8_t> buf;
+    std::vector<uint8_t>& buf = pack_scratch();
     pack(in, buf);
     out.insert(out.end(), buf.begin(), buf.end());
+    trim_pack_scratch();
   }
 
   void decode(const uint8_t* data,
@@ -120,8 +138,12 @@ class ZstdBlockCoder final : public BlockCoder {
 
   Entropy id() const override { return Entropy::Zstd; }
 
+  // Appends the frame to `out`, which is first grown by
+  // ZSTD_compressBound and then shrunk to the frame (its capacity stays at
+  // the bound: the encoder passes a reused per-thread buffer and keeps an
+  // exact-size copy).
   void encode(const BlockPlanes& in, std::vector<uint8_t>& out) const override {
-    std::vector<uint8_t> buf;
+    std::vector<uint8_t>& buf = pack_scratch();
     pack(in, buf);
 
     PRMD_TIMED("zstd_compress");
@@ -134,6 +156,7 @@ class ZstdBlockCoder final : public BlockCoder {
       throw std::runtime_error(std::string("zstd: ") + ZSTD_getErrorName(r));
     }
     out.resize(start + r);
+    trim_pack_scratch();
   }
 
   void decode(const uint8_t* data,

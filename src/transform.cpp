@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "prmd/internal/parallel.h"
+
 namespace prmd::internal {
 
 namespace {
@@ -84,29 +86,33 @@ class HaarTransform final : public WaveletTransform {
  public:
   void forward(const Region& fine,
                Region& coarse,
-               std::vector<Region>& bands) const override {
+               std::vector<Region>& bands,
+               Pool* pool) const override {
     const Dims c = half_up(dims_of(fine));
     coarse = whole_plane(c);
     bands.assign(3, whole_plane(c));
 
-    for (int j = 0; j < c.h; ++j) {
-      for (int i = 0; i < c.w; ++i) {
-        const int32_t a = rep(fine, 2 * i, 2 * j);
-        const int32_t b = rep(fine, 2 * i + 1, 2 * j);
-        const int32_t cc = rep(fine, 2 * i, 2 * j + 1);
-        const int32_t d = rep(fine, 2 * i + 1, 2 * j + 1);
+    // Coarse row j depends on fine rows 2j, 2j+1 only.
+    parallel_rows(pool, c.h, 8 * c.w, [&](int j0, int j1) {
+      for (int j = j0; j < j1; ++j) {
+        for (int i = 0; i < c.w; ++i) {
+          const int32_t a = rep(fine, 2 * i, 2 * j);
+          const int32_t b = rep(fine, 2 * i + 1, 2 * j);
+          const int32_t cc = rep(fine, 2 * i, 2 * j + 1);
+          const int32_t d = rep(fine, 2 * i + 1, 2 * j + 1);
 
-        const int32_t l0 = (a + b) >> 1;
-        const int32_t h0 = a - b;
-        const int32_t l1 = (cc + d) >> 1;
-        const int32_t h1 = cc - d;
+          const int32_t l0 = (a + b) >> 1;
+          const int32_t h0 = a - b;
+          const int32_t l1 = (cc + d) >> 1;
+          const int32_t h1 = cc - d;
 
-        coarse.at(i, j) = (l0 + l1) >> 1;
-        bands[0].at(i, j) = l0 - l1;         // LH
-        bands[1].at(i, j) = (h0 + h1) >> 1;  // HL
-        bands[2].at(i, j) = h0 - h1;         // HH
+          coarse.at(i, j) = (l0 + l1) >> 1;
+          bands[0].at(i, j) = l0 - l1;         // LH
+          bands[1].at(i, j) = (h0 + h1) >> 1;  // HL
+          bands[2].at(i, j) = h0 - h1;         // HH
+        }
       }
-    }
+    });
   }
 
   Rect coarse_needed(const Rect& r, Dims fine) const override {
@@ -204,57 +210,62 @@ class Cdf53Transform final : public WaveletTransform {
  public:
   void forward(const Region& fine,
                Region& coarse,
-               std::vector<Region>& bands) const override {
+               std::vector<Region>& bands,
+               Pool* pool) const override {
     const Dims c = half_up(dims_of(fine));
     const int pw = 2 * c.w;
     const int ph = 2 * c.h;
     const size_t cw = size_t(c.w);
 
     // Horizontal pass: rows → L (horizontal low) and H (horizontal high), each
-    // c.w wide and ph tall.
+    // c.w wide and ph tall. Rows are independent.
     std::vector<int32_t> lo_rows(cw * size_t(ph));
     std::vector<int32_t> hi_rows(cw * size_t(ph));
-    std::vector<int32_t> line(static_cast<size_t>(pw));
-    std::vector<int32_t> s(cw);
-    std::vector<int32_t> d(cw);
-
-    for (int y = 0; y < ph; ++y) {
-      for (int x = 0; x < pw; ++x) {
-        line[size_t(x)] = rep(fine, x, y);
+    parallel_rows(pool, ph, 2 * pw, [&](int y0, int y1) {
+      std::vector<int32_t> line(static_cast<size_t>(pw));
+      std::vector<int32_t> s(cw);
+      std::vector<int32_t> d(cw);
+      for (int y = y0; y < y1; ++y) {
+        for (int x = 0; x < pw; ++x) {
+          line[size_t(x)] = rep(fine, x, y);
+        }
+        fwd53(line.data(), pw, s.data(), d.data());
+        std::copy(s.begin(), s.end(), lo_rows.begin() + ptrdiff_t(size_t(y) * cw));
+        std::copy(d.begin(), d.end(), hi_rows.begin() + ptrdiff_t(size_t(y) * cw));
       }
-      fwd53(line.data(), pw, s.data(), d.data());
-      for (int k = 0; k < c.w; ++k) {
-        lo_rows[size_t(y) * cw + size_t(k)] = s[size_t(k)];
-        hi_rows[size_t(y) * cw + size_t(k)] = d[size_t(k)];
-      }
-    }
+    });
 
     // Vertical pass: fwd53() down every column of `rows` → `lo` and `hi`
     // planes, evaluated row by row over all columns at once (row-major, one
     // sequential stream per input row instead of one cache miss per sample).
     // Same integer formulas as fwd53() with n = ph, m = c.h: first every d
-    // (high) row, then every s (low) row, which needs d rows j-1 and j.
+    // (high) row, then every s (low) row, which needs d rows j-1 and j. Rows
+    // inside each of the two steps are independent.
     auto vertical = [&](const std::vector<int32_t>& rows, Region& lo,
                         Region& hi) {
       auto in = [&](int y) { return rows.data() + size_t(y) * cw; };
-      for (int j = 0; j < c.h; ++j) {
-        const int32_t* x0 = in(2 * j);
-        const int32_t* x1 = in(2 * j + 1);
-        const int32_t* x2 = in(2 * j + 2 < ph ? 2 * j + 2 : ph - 2);
-        int32_t* hi_row = hi.row(j);
-        for (size_t k = 0; k < cw; ++k) {
-          hi_row[k] = x1[k] - ((x0[k] + x2[k]) >> 1);
+      parallel_rows(pool, c.h, 3 * c.w, [&](int j0, int j1) {
+        for (int j = j0; j < j1; ++j) {
+          const int32_t* x0 = in(2 * j);
+          const int32_t* x1 = in(2 * j + 1);
+          const int32_t* x2 = in(2 * j + 2 < ph ? 2 * j + 2 : ph - 2);
+          int32_t* hi_row = hi.row(j);
+          for (size_t k = 0; k < cw; ++k) {
+            hi_row[k] = x1[k] - ((x0[k] + x2[k]) >> 1);
+          }
         }
-      }
-      for (int j = 0; j < c.h; ++j) {
-        const int32_t* x0 = in(2 * j);
-        const int32_t* dl = hi.row(j > 0 ? j - 1 : 0);
-        const int32_t* dj = hi.row(j);
-        int32_t* lo_row = lo.row(j);
-        for (size_t k = 0; k < cw; ++k) {
-          lo_row[k] = x0[k] + ((dl[k] + dj[k] + 2) >> 2);
+      });
+      parallel_rows(pool, c.h, 3 * c.w, [&](int j0, int j1) {
+        for (int j = j0; j < j1; ++j) {
+          const int32_t* x0 = in(2 * j);
+          const int32_t* dl = hi.row(j > 0 ? j - 1 : 0);
+          const int32_t* dj = hi.row(j);
+          int32_t* lo_row = lo.row(j);
+          for (size_t k = 0; k < cw; ++k) {
+            lo_row[k] = x0[k] + ((dl[k] + dj[k] + 2) >> 2);
+          }
         }
-      }
+      });
     };
 
     coarse = whole_plane(c);
@@ -355,6 +366,39 @@ inline int32_t up1(Downsampler phase, int i, int cn, CF c) {
   return (3 * c(n) + c(std::min(n + 1, cn - 1)) + 2) >> 2;
 }
 
+// U(coarse) over fine rect r. `coarse` must cover coarse_support(r, fine).
+// Both passes are row-independent, so `pool` splits them by rows.
+void upsample(Downsampler down,
+              const Region& coarse,
+              const Rect& r,
+              Dims fine,
+              Region& out,
+              Pool* pool) {
+  const Dims c = half_up(fine);
+  const Rect K = coarse_support(r, fine);
+
+  // Horizontal pass over the needed coarse rows.
+  Region tmp(Rect{r.x, K.y, r.w, K.h});
+  parallel_rows(pool, K.h, 2 * r.w, [&](int k0, int k1) {
+    for (int j = K.y + k0; j < K.y + k1; ++j) {
+      for (int x = r.x; x < r.right(); ++x) {
+        tmp.at(x, j) =
+            up1(down, x, c.w, [&](int n) { return coarse.at(n, j); });
+      }
+    }
+  });
+
+  // Vertical pass.
+  out = Region(r);
+  parallel_rows(pool, r.h, 2 * r.w, [&](int y0, int y1) {
+    for (int y = r.y + y0; y < r.y + y1; ++y) {
+      for (int x = r.x; x < r.right(); ++x) {
+        out.at(x, y) = up1(down, y, c.h, [&](int n) { return tmp.at(x, n); });
+      }
+    }
+  });
+}
+
 class LaplacianTransform final : public LevelTransform {
  public:
   explicit LaplacianTransform(Downsampler d) : down_(d) {}
@@ -369,16 +413,19 @@ class LaplacianTransform final : public LevelTransform {
 
   void forward(const Region& fine,
                Region& coarse,
-               std::vector<Region>& bands) const override {
-    coarse = downsample(fine, down_);
+               std::vector<Region>& bands,
+               Pool* pool) const override {
+    coarse = downsample(fine, down_, pool);
 
     Region up;
-    upsample(coarse, fine.rect, dims_of(fine), up);
+    upsample(down_, coarse, fine.rect, dims_of(fine), up, pool);
 
     bands.assign(1, Region(fine.rect));
-    for (size_t i = 0; i < fine.v.size(); ++i) {
-      bands[0].v[i] = fine.v[i] - up.v[i];
-    }
+    parallel_samples(pool, fine.v.size(), [&](size_t b, size_t e) {
+      for (size_t i = b; i < e; ++i) {
+        bands[0].v[i] = fine.v[i] - up.v[i];
+      }
+    });
   }
 
   Rect coarse_needed(const Rect& r, Dims fine) const override {
@@ -394,7 +441,7 @@ class LaplacianTransform final : public LevelTransform {
                const Rect& r,
                Dims fine,
                Region& out) const override {
-    upsample(coarse, r, fine, out);
+    upsample(down_, coarse, r, fine, out, nullptr);
     for (int y = r.y; y < r.bottom(); ++y) {
       for (int x = r.x; x < r.right(); ++x) {
         out.at(x, y) += bands[0].at(x, y);
@@ -403,32 +450,6 @@ class LaplacianTransform final : public LevelTransform {
   }
 
  private:
-  // U(coarse) over fine rect r. `coarse` must cover coarse_needed(r).
-  void upsample(const Region& coarse,
-                const Rect& r,
-                Dims fine,
-                Region& out) const {
-    const Dims c = half_up(fine);
-    const Rect K = coarse_needed(r, fine);
-
-    // Horizontal pass over the needed coarse rows.
-    Region tmp(Rect{r.x, K.y, r.w, K.h});
-    for (int j = K.y; j < K.bottom(); ++j) {
-      for (int x = r.x; x < r.right(); ++x) {
-        tmp.at(x, j) =
-            up1(down_, x, c.w, [&](int n) { return coarse.at(n, j); });
-      }
-    }
-
-    // Vertical pass.
-    out = Region(r);
-    for (int y = r.y; y < r.bottom(); ++y) {
-      for (int x = r.x; x < r.right(); ++x) {
-        out.at(x, y) = up1(down_, y, c.h, [&](int n) { return tmp.at(x, n); });
-      }
-    }
-  }
-
   Downsampler down_;
 };
 
@@ -458,22 +479,24 @@ void copy_overlap(const Region& src, Region& dst) {
   }
 }
 
-Region downsample_box(const Region& fine) {
+Region downsample_box(const Region& fine, Pool* pool) {
   const Dims c = half_up(dims_of(fine));
   Region out = whole_plane(c);
 
-  for (int j = 0; j < c.h; ++j) {
-    for (int i = 0; i < c.w; ++i) {
-      const int32_t sum =
-          rep(fine, 2 * i, 2 * j) + rep(fine, 2 * i + 1, 2 * j) +
-          rep(fine, 2 * i, 2 * j + 1) + rep(fine, 2 * i + 1, 2 * j + 1);
-      out.at(i, j) = (sum + 2) >> 2;
+  parallel_rows(pool, c.h, 5 * c.w, [&](int j0, int j1) {
+    for (int j = j0; j < j1; ++j) {
+      for (int i = 0; i < c.w; ++i) {
+        const int32_t sum =
+            rep(fine, 2 * i, 2 * j) + rep(fine, 2 * i + 1, 2 * j) +
+            rep(fine, 2 * i, 2 * j + 1) + rep(fine, 2 * i + 1, 2 * j + 1);
+        out.at(i, j) = (sum + 2) >> 2;
+      }
     }
-  }
+  });
   return out;
 }
 
-Region downsample_gauss(const Region& fine) {
+Region downsample_gauss(const Region& fine, Pool* pool) {
   static constexpr int kTap[5] = {1, 4, 6, 4, 1};
   const int fw = fine.rect.w;
   const int fh = fine.rect.h;
@@ -481,33 +504,45 @@ Region downsample_gauss(const Region& fine) {
 
   // Horizontal pass: c.w columns, every fine row.
   Region tmp(Rect{0, 0, c.w, fh});
-  for (int y = 0; y < fh; ++y) {
-    for (int i = 0; i < c.w; ++i) {
-      int32_t s = 0;
-      for (int t = -2; t <= 2; ++t) {
-        s += kTap[t + 2] * fine.at(reflect101(2 * i + t, fw), y);
+  parallel_rows(pool, fh, 6 * c.w, [&](int y0, int y1) {
+    for (int y = y0; y < y1; ++y) {
+      for (int i = 0; i < c.w; ++i) {
+        int32_t s = 0;
+        for (int t = -2; t <= 2; ++t) {
+          s += kTap[t + 2] * fine.at(reflect101(2 * i + t, fw), y);
+        }
+        tmp.at(i, y) = s;
       }
-      tmp.at(i, y) = s;
     }
-  }
+  });
 
   // Vertical pass and normalization by 16 × 16.
   Region out = whole_plane(c);
-  for (int j = 0; j < c.h; ++j) {
-    for (int i = 0; i < c.w; ++i) {
-      int32_t s = 0;
-      for (int t = -2; t <= 2; ++t) {
-        s += kTap[t + 2] * tmp.at(i, reflect101(2 * j + t, fh));
+  parallel_rows(pool, c.h, 6 * c.w, [&](int j0, int j1) {
+    for (int j = j0; j < j1; ++j) {
+      for (int i = 0; i < c.w; ++i) {
+        int32_t s = 0;
+        for (int t = -2; t <= 2; ++t) {
+          s += kTap[t + 2] * tmp.at(i, reflect101(2 * j + t, fh));
+        }
+        out.at(i, j) = (s + 128) >> 8;
       }
-      out.at(i, j) = (s + 128) >> 8;
     }
-  }
+  });
   return out;
 }
 
-Region downsample(const Region& fine, Downsampler d) {
-  return d == Downsampler::Gauss ? downsample_gauss(fine)
-                                 : downsample_box(fine);
+Region downsample(const Region& fine, Downsampler d, Pool* pool) {
+  return d == Downsampler::Gauss ? downsample_gauss(fine, pool)
+                                 : downsample_box(fine, pool);
+}
+
+void laplacian_upsample(Downsampler d,
+                        const Region& coarse,
+                        Dims fine,
+                        Region& out,
+                        Pool* pool) {
+  upsample(d, coarse, Rect{0, 0, fine.w, fine.h}, fine, out, pool);
 }
 
 std::unique_ptr<LevelTransform> make_transform(Transform t, Downsampler d) {

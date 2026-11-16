@@ -10,8 +10,14 @@
 
 namespace prmd::internal {
 
+class Pool;
+
 // One whole-plane Region per channel.
 std::vector<Region> to_planes(const Image& img);
+// to_planes(convert(img, stored)) without the intermediate image: the planes
+// of `img` converted to `stored` (same BT.601 integer formula as convert()),
+// rows split over `pool` when given.
+std::vector<Region> to_planes(const Image& img, ColorFormat stored, Pool* pool);
 // Clamps to [0, 255]. All planes must share one rect; returns an image of that
 // rect's size.
 Image from_planes(const std::vector<Region>& planes, ColorFormat f);
