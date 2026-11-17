@@ -701,13 +701,13 @@ The input is converted to the requested color format(s) and center-cropped or ed
 
 ### 4.3 `prmdpipeline`
 ```
-prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
+prmdpipeline <image> [--levels 5] [--mode haar|cdf53|laplacian|naive] [--down box|gauss]
              [--color gray|rgb] [--quant Q] [--entropy zstd|range|raw] [--entropy-level N]
              [--tile 256] [--cblk 128] [--cache-mib 0] [--runs 5] [--file pipeline.prmd] [--label text]
              [--threads 0]
 ```
 Loads the image, encodes it once, then decodes a fixed navigation plan: one 256² crop per level
-from the coarsest down, then 4 pans/jumps at L0 (10 crops at `--levels 6`). Prints median wall
+from the coarsest down, then 4 pans/jumps at L0 (9 crops at the default `--levels 5`, 10 at `--levels 6`). Prints median wall
 times over `--runs`. Per-step timers (`PRMD_TIMED`, `include/prmd/profile.h`) are compiled in
 only with the CMake option `-DPRMD_PROFILE=ON` (default OFF); without it the macro expands to
 nothing. `--threads N` (default 0 = automatic) sets the encoder threads; with N > 1 the breakdown adds an

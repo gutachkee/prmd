@@ -27,7 +27,7 @@
 // wall time; the "on workers" column gives the part measured on worker
 // threads (include/prmd/profile.h, "Threads").
 //
-// usage: prmdpipeline <image> [--levels 6] [--mode haar|cdf53|laplacian|naive]
+// usage: prmdpipeline <image> [--levels 5] [--mode haar|cdf53|laplacian|naive]
 //          [--down box|gauss] [--color gray|rgb] [--quant Q]
 //          [--entropy zstd|range|raw] [--entropy-level N] [--tile 256]
 //          [--cblk 128] [--cache-mib 0] [--runs 5] [--file out.prmd]
@@ -80,7 +80,7 @@ struct Options {
 [[noreturn]] void usage(const std::string& why) {
   std::fprintf(stderr,
                "prmdpipeline: %s\n"
-               "usage: prmdpipeline <image> [--levels 6] [--mode "
+               "usage: prmdpipeline <image> [--levels 5] [--mode "
                "haar|cdf53|laplacian|naive] [--down box|gauss]\n"
                "         [--color gray|rgb] [--quant Q] [--entropy "
                "zstd|range|raw] [--entropy-level N]\n"
@@ -93,7 +93,6 @@ struct Options {
 
 Options parse(int argc, char** argv) {
   Options o;
-  o.enc.levels = 6;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a.rfind("--", 0) != 0) {

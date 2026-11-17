@@ -124,7 +124,7 @@ RGB:
 
 - The slow coders (zstd 19, range) and JPEG2000 reach 3.0–3.5× on 4 cores, since block coding is almost all of their time. The zstd-1 encodes reach 2.1–2.7×: the transforms are limited by the Pi's memory bandwidth, and the file write stays serial. The fourth core adds only 2–11% for them.
 - *auto* equals N=4 within 1% in every row: on 4 cores the automatic rule ([design.md §1.4](design.md)) already asks for all of them from about a 720² gray `haar` image (less for the costlier modes and coders), so it never picks a count below the best one here. JPEG2000 with 256² tiles can use 4 threads, the same cap as the core count.
-- Full image (`prmdpipeline test_image.jpg --runs 5`, 8824 × 5336, 6 levels, defaults, file in `/tmp`): encode 645 ms on one thread, 273 ms automatic (2.4×). The 10 crops took 13.4 ms after either encode.
+- Full image (`prmdpipeline test_image.jpg --runs 5 --levels 6`, 8824 × 5336, otherwise defaults, file in `/tmp`): encode 645 ms on one thread, 273 ms automatic (2.4×). The 10 crops took 13.4 ms after either encode.
 
 ## Entropy coders
 

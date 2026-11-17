@@ -57,13 +57,14 @@ binary. To compile them in, use a separate build directory:
 
 ```sh
 cmake -B build-profile -DCMAKE_BUILD_TYPE=Release -DPRMD_PROFILE=ON && cmake --build build-profile -j
-build-profile/prmdpipeline test_image.jpg --runs 5 --threads 1     # per-step breakdown, serial
-build/prmdpipeline test_image.jpg --runs 5 --threads 1            # totals without timers
-build/prmdpipeline test_image.jpg --runs 5                        # totals, automatic threads
+build-profile/prmdpipeline test_image.jpg --runs 5 --levels 6 --threads 1     # per-step breakdown, serial
+build/prmdpipeline test_image.jpg --runs 5 --levels 6 --threads 1            # totals without timers
+build/prmdpipeline test_image.jpg --runs 5 --levels 6                        # totals, automatic threads
 ```
 
 `prmdpipeline` encodes once and decodes one 256² crop per level (overview, then zooming in) plus
-4 pans and jumps at L0: 10 crops with the default `--levels 6`. `--levels`, `--mode`, `--down`,
+4 pans and jumps at L0: 9 crops with the default `--levels 5` (10 with the `--levels 6` used
+in [pipeline_durations.md](docs/pipeline_durations.md)). `--levels`, `--mode`, `--down`,
 `--color`, `--quant`, `--entropy`, `--entropy-level`, `--tile`, `--cblk`, `--cache-mib` and
 `--threads` (encoder threads, default 0 = automatic) change the scenario; `--runs N` takes the median of N runs, `--file` sets the output `.prmd` path
 (default `pipeline.prmd` in the current directory) and `--label` names the run in the report. Results and method:

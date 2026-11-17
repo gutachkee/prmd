@@ -53,11 +53,11 @@ The timers are part of the code, and are compiled out unless you ask for them.
   ```sh
   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
   cmake -B build-profile -DCMAKE_BUILD_TYPE=Release -DPRMD_PROFILE=ON && cmake --build build-profile -j
-  build/prmdpipeline test_image.jpg --runs 5 --threads 1                 # totals, one thread
-  build/prmdpipeline test_image.jpg --runs 5                             # totals, automatic threads
-  build-profile/prmdpipeline test_image.jpg --runs 5 --threads 1         # breakdown, one thread
-  build-profile/prmdpipeline test_image.jpg --runs 5                     # breakdown, automatic threads
-  build-profile/prmdpipeline test_image.jpg --runs 5 --threads 1 --mode cdf53 --quant 4   # any other row
+  build/prmdpipeline test_image.jpg --runs 5 --levels 6 --threads 1                 # totals, one thread
+  build/prmdpipeline test_image.jpg --runs 5 --levels 6                             # totals, automatic threads
+  build-profile/prmdpipeline test_image.jpg --runs 5 --levels 6 --threads 1         # breakdown, one thread
+  build-profile/prmdpipeline test_image.jpg --runs 5 --levels 6                     # breakdown, automatic threads
+  build-profile/prmdpipeline test_image.jpg --runs 5 --levels 6 --threads 1 --mode cdf53 --quant 4   # any other row
   ```
   Totals come from `build`, and shares and step times from `build-profile`. Every row of [All modes and options](#all-modes-and-options) was run at `--threads 1` and at the default in both builds.
 - **Overhead of the timers.** Single-thread encodes agree within ±4% between the two builds (the timer build was faster in 4 of 12 rows). The 10 crops took 0–10% longer in the timer build (14% for `naive`, see below); a crop runs about 110 timer scopes, so part of that is overhead and part noise. Shares within the timer build are not affected much.
@@ -67,7 +67,7 @@ The timers are part of the code, and are compiled out unless you ask for them.
 
 ## Threads: defaults on 1 and 14 threads
 
-Defaults (`haar`, gray, zstd 1), timer build, median of 5, `prmdpipeline --threads 1` and the default (automatic, which uses all 14 threads for this image). At 14 threads, steps opened on the calling thread are wall time; the per-block steps under `encode_blocks` add up the time of all 14 threads (92–93% of it on workers), so they exceed their parent.
+Defaults (`haar`, gray, zstd 1), timer build, median of 5, `prmdpipeline --levels 6 --threads 1` and the default (automatic, which uses all 14 threads for this image). At 14 threads, steps opened on the calling thread are wall time; the per-block steps under `encode_blocks` add up the time of all 14 threads (92–93% of it on workers), so they exceed their parent.
 
 | step | 1 thread: ms | 14 threads: ms | 14 threads: what it is |
 |---|---:|---:|---|
