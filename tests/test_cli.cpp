@@ -313,3 +313,24 @@ TEST(Cli, SerialEncodePrintsWhatItPrintedBeforeThreading) {
   mt_labels.pop_back();
   EXPECT_EQ(mt_labels, expected_labels);
 }
+
+TEST(Cli, InputLineNamesTheStoredFormatWhenItDiffers) {
+  const CliFiles& f = files();
+  const std::string rgb_png = testutil::temp_path("cli_rgb_src.png").string();
+  save_png(rgb_png, convert(f.src, ColorFormat::RGB8));
+  const std::string out = testutil::temp_path("cli_stored.prmd").string();
+
+  // An RGB input stored as gray (the default) says so.
+  ASSERT_EQ(run_cli({"encode", rgb_png, out, "--levels", "3"}), 0);
+  std::vector<std::string> lines = log_lines();
+  ASSERT_FALSE(lines.empty());
+  EXPECT_EQ(lines[0],
+            "input           " + rgb_png + "  300x200 rgb (stored as gray)");
+
+  // Stored as it came: no note.
+  ASSERT_EQ(
+      run_cli({"encode", rgb_png, out, "--levels", "3", "--color", "rgb"}), 0);
+  lines = log_lines();
+  ASSERT_FALSE(lines.empty());
+  EXPECT_EQ(lines[0], "input           " + rgb_png + "  300x200 rgb");
+}

@@ -253,8 +253,14 @@ int cmd_encode(int argc, char** argv) {
   }
 
   const Image src = load_image(a.pos[0]);
-  std::printf("input           %s  %dx%d %s\n", a.pos[0].c_str(), src.width,
-              src.height, info(src.format).name);
+  // Name the stored format too when the encoder converts (e.g. an RGB JPEG
+  // stored as gray, the default).
+  const std::string stored =
+      src.format == o.color
+          ? std::string()
+          : std::string(" (stored as ") + info(o.color).name + ")";
+  std::printf("input           %s  %dx%d %s%s\n", a.pos[0].c_str(), src.width,
+              src.height, info(src.format).name, stored.c_str());
 
   const EncodeReport r = encode_file(src, a.pos[1], codec, o);
   std::printf("output          %s\n", a.pos[1].c_str());
