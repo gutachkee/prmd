@@ -97,10 +97,12 @@ Timer build, median of 5 runs, `--threads 1`. Nested steps are indented and incl
 | └ `decompose` / `forward` | 5 | 49.3 | 21% | Haar: L0 → L1 … L4 → L5 (LL plus 3 bands per level) |
 | └ `stored_planes` | 1 | 0.55 | 0% | move the bands into their stored layout (no quantize pass when lossless) |
 | └ `encode_blocks` | 1 | 138 | 59% | every block, coarsest level first |
-|  └ `extract` | 3906 | 9.8 | 4% | copy the block's samples out of the plane |
-|  └ `med_residual` | 6 | 0.04 | 0% | only the 6 base (L5) blocks |
-|  └ `pack` | 3906 | 21.0 | 9% | int32 → zigzag uint16, split into low and high bytes |
-|  └ **`zstd_compress`** | 3906 | **104** | **45%** | **the largest single step** |
+|  └ `make_block` | 3906 | 10.2 | 4% | gather one block's samples |
+|   └ `extract` | 3906 | 9.8 | 4% | copy the block's samples out of the plane |
+|   └ `med_residual` | 6 | 0.04 | 0% | only the 6 base (L5) blocks |
+|  └ `entropy_encode` | 3906 | 127 | 54% | code one block |
+|   └ `pack` | 3906 | 21.0 | 9% | int32 → zigzag uint16, split into low and high bytes |
+|   └ **`zstd_compress`** | 3906 | **104** | **45%** | **the largest single step** |
 | └ `serialize` header + index | 1 | 0.00 | 0% | |
 | └ `write_file`, 31.6 MiB | 1 | 13.2 | 6% | temporary file, renamed over the target when complete |
 | └ other (geometry, allocation, block loop) | | 1.8 | 1% | |

@@ -27,7 +27,7 @@ sudo apt install build-essential cmake pkg-config \
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # -DPRMD_NATIVE=OFF to skip -mcpu=native
 cmake --build build -j
-ctest --test-dir build -j8 --output-on-failure    # 874 tests
+(cd build && ctest -j8 --output-on-failure)       # 884 tests
 ```
 
 This produces `build/prmd` (CLI), `build/prmdbench` (benchmark), `build/prmdpipeline`
@@ -40,10 +40,10 @@ on it. Use a separate build directory:
 
 ```sh
 cmake -B build-asan -DPRMD_SANITIZE=address,undefined && cmake --build build-asan -j
-ctest --test-dir build-asan -j8 --output-on-failure
+(cd build-asan && ctest -j8 --output-on-failure)
 
 CC=clang CXX=clang++ cmake -B build-tsan -DPRMD_SANITIZE=thread && cmake --build build-tsan -j
-ctest --test-dir build-tsan -j8 --output-on-failure
+(cd build-tsan && ctest -j8 --output-on-failure)
 ```
 
 ThreadSanitizer checks the multithreaded encoder. Build it with clang: GCC 15's libtsan crashes
@@ -99,10 +99,10 @@ build/prmd info img.prmd
 | `--down` | `box`, `gauss` (for `laplacian` / `naive`) | `box` |
 | `--levels` | 1–16 | 5 |
 | `--tile`, `--cblk` | tile (reporting unit) and code-block (decode unit) size | 256, 128 |
-| `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4–5% smaller, ~12× slower decode; ~10× on a Pi 5), `raw` | `zstd` — see [design.md §7.1](docs/design.md) |
+| `--entropy` | `zstd` (fast decode), `range` (context-adaptive, ~4% smaller, ~12× slower decode; ~10× on a Pi 5), `raw` | `zstd` — see [design.md §7.1](docs/design.md) |
 | `--entropy-level` | zstd level 1–22. 19 encodes 13–36× slower on one thread and 6–21× with the default threads (mode-dependent); it makes gray lossless files no smaller, but RGB files 2.7–4.1% and lossy files 3–12% smaller ([design.md §7.2](docs/design.md)) | 1 |
 | `--quant` | 0 = lossless; Q > 0 = lossy quantizer step (`haar`, `cdf53`, `laplacian`). Laplacian guarantees ±Q/2 per level on gray | 0 |
-| `--no-med` | store base-block pixels as they are, without MED prediction (the coarsest level; every level for `naive`). Faster crops, larger file: gray `naive` +23%, crops about 1.5× faster ([benchmarks.md](docs/benchmarks.md)) | MED on |
+| `--no-med` | store base-block pixels as they are, without MED prediction (the coarsest level; every level for `naive`). Faster crops, larger file: gray `naive` +23%, crops about 1.6× faster ([benchmarks.md](docs/benchmarks.md)) | MED on |
 | `--no-ycocg` | store R, G, B as they are, without YCoCg-R (`rgb` only; ignored for gray) | YCoCg-R on |
 | `--threads` | encoder threads: 0 = automatic (the library chooses per image from its size and the cost of the mode and coder, up to all hardware threads; small images run serially with no thread started), 1 = serial, N = at most N. The `.prmd` file is byte-identical for every value; at most one thread per code-block. J2K uses at most one thread per 4 code-blocks of a tile (4 for 256² tiles). A multithreaded encode adds a `threads N` line to the report | 0 |
 | `--j2k-tile`, `--j2k-lossy-psnr` | J2K tile size; lossy 9/7 target PSNR | 256; lossless |
@@ -131,7 +131,11 @@ Encoding is multithreaded by default (`EncodeOptions::threads = 0`, automatic: a
 large ones; see [design.md §1.4](docs/design.md)), and the file does not depend on the thread
 count. A program that already encodes several images in parallel should pass `threads = 1`.
 Output files are written to a temporary file next to the target and renamed over it when
-complete, so a failed encode never truncates or half-writes an existing file. Decoding is
+complete, so a failed encode never truncates or half-writes an existing file. When that is
+impossible but the file itself is writable (a read-only directory, a path too long for a
+temporary name, another user's file in a sticky directory such as `/tmp`), the file is written
+in place as `fopen("wb")` would, without that guarantee ([design.md §1.4](docs/design.md),
+"Errors"). Decoding is
 single-threaded; a decoder must not be shared between threads.
 
 ## Benchmark

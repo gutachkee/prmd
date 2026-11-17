@@ -51,7 +51,7 @@ These apply to every mode unless the matrix below says otherwise. Each CLI optio
 
 **Entropy coders** (gray, `haar`):
 - `zstd`: the default. 11.58 MiB, 0.59 ms per 256² crop.
-- `range`: a context-adaptive range coder. Files are 4–5% smaller (11.13 MiB), but decode is about 12× slower (7.4 ms).
+- `range`: a context-adaptive range coder. Files are about 4% smaller (11.13 MiB against 11.58), but decode is about 12× slower (7.4 ms).
 - `raw`: uncompressed (32 MiB). Only useful for measuring transform cost.
 
 **Color.** With `rgb`, each channel gets the gray mode's filters independently. The stored values then go through the reversible YCoCg-R transform, so RGB stays bit-exact when lossless.
@@ -196,7 +196,7 @@ build/prmd encode in.jpg out.prmd --mode laplacian --down gauss --quant 4   # ev
 
 **Name.** It is the straightforward, "naive" layout from the task: every level stored on its own, with no use of the fact that each level is made from the one below. The code calls it `Transform::Independent`.
 
-The task's baseline. Every level is downsampled with `--down` (`box` or `gauss`, as in `laplacian`) and stored on its own as plain pixels, using the same block layout and entropy coder as the other modes. A crop reads only its own level, so it touches fewer blocks (8.9 against 17.5 for `haar` at L0). The file stores 1.33× the samples, though, so it's 30% larger than `haar`'s. Crops are about as fast as `haar`'s: fewer blocks, but each pixel block runs the MED predictor, which goes pixel by pixel. `--no-med` skips it: crops get about 1.5× faster (gray) and the file 23% larger ([benchmarks.md](benchmarks.md)).
+The task's baseline. Every level is downsampled with `--down` (`box` or `gauss`, as in `laplacian`) and stored on its own as plain pixels, using the same block layout and entropy coder as the other modes. A crop reads only its own level, so it touches fewer blocks (8.9 against 17.5 for `haar` at L0). The file stores 1.33× the samples, though, so it's 30% larger than `haar`'s. Crops are about as fast as `haar`'s: fewer blocks, but each pixel block runs the MED predictor, which goes pixel by pixel. `--no-med` skips it: crops get about 1.6× faster (gray) and the file 23% larger ([benchmarks.md](benchmarks.md)).
 
 **Example:** level 1 is `[11, 15, 61, 65]` with `box`, and the file stores the 8 pixels of level 0 plus the 4 of level 1.
 

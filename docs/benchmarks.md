@@ -278,7 +278,7 @@ An RGB crop costs about 3–3.5× a gray one (three planes plus the YCoCg-R inve
 
 Without MED and YCoCg-R, RGB `naive` crops decode about 1.7× faster (1.06 against 1.82 ms in the same run), and the file nearly doubles (+87.5%), ending up larger than raw L0.
 
-With the automatic thread count the RGB `.prmd` encodes take 50–97 ms, 4.5–7× faster than with one thread; the slow coders gain most (range 9.6×, zstd 19 9.8×), JPEG2000 with 256² tiles only 2× (at most 4 threads). zstd 19 saves 4.1% on `haar` for a 31× slower encode with one thread, 15× with threads. Full-level decode is the same speed; its 256² crops were 21% slower in the single-thread run (2.29 vs 1.89 ms) and 5% slower in the automatic-thread run, so this is mostly noise. The range coder is 8.8× slower per 256² crop.
+With the automatic thread count the RGB `.prmd` encodes take 50–97 ms, 4.2–7× faster than with one thread; the slow coders gain most (range 9.6×, zstd 19 9.8×), JPEG2000 with 256² tiles only 2× (at most 4 threads). zstd 19 saves 4.1% on `haar` for a 31× slower encode with one thread, 15× with threads. Full-level decode is the same speed; its 256² crops were 21% slower in the single-thread run (2.29 vs 1.89 ms) and 5% slower in the automatic-thread run, so this is mostly noise. The range coder is 8.8× slower per 256² crop.
 
 **Block cache.** On a 1000-step random walk of 256² crops at L0, a 64 MiB cache brings `haar` from 1.98 to 0.55 ms, `naive` from 1.80 to 0.16 ms and `haar+range` from 16.0 to 0.67 ms.
 

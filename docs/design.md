@@ -275,8 +275,9 @@ EncodeReport encode_file(const Image& src, const std::string& out_path,
   exact-size payloads. Row and sample loops of at most 32 Ki samples (two chunks) run inline on
   the calling thread. A parallel run wakes at most one worker per chunk beyond the caller's
   first, and a worker that arrives after every chunk is claimed does not join, so the caller
-  never waits for a worker that would find nothing to do. Idle workers spin for 100 µs before
-  they sleep, as the stages follow each other within microseconds (a futex wake-up costs tens of
+  does not wait for workers that arrive after the seats are closed (it still waits for every
+  worker that took a seat, so one preempted after joining can delay it). Idle workers spin for
+  100 µs before they sleep, as the stages follow each other within microseconds (a futex wake-up costs tens of
   microseconds here); together these cut the cost of an empty 14-thread run from 320 µs to 29 µs
   and the 1024² RGB encode at 14 threads from 14.4 to 4.8 ms. Offsets are summed in id order and
   the payloads are streamed to the file. Planes that a pass overwrites entirely are allocated
@@ -294,18 +295,30 @@ EncodeReport encode_file(const Image& src, const std::string& out_path,
   the serial encoder's (and the encoder before threading's) precedence, at every thread count.
   **Output files are replaced only when complete** (`internal/output_file.h`, for `.prmd` and
   J2K): the bytes go to a temporary file `<out_path>.tmp.<pid>.<random>` in the same
-  directory, created exclusively (`O_EXCL`), which is closed with every error checked and then
-  `rename()`d over `out_path`. Any failure — while coding, or in the write itself (disk full,
-  `EIO`, `RLIMIT_FSIZE`) — removes the temporary file and leaves an existing `out_path` exactly
-  as it was, never truncated or half-written (before, `fopen("wb")` truncated it first). The
-  semantics otherwise follow `fopen(out_path, "wb")`: a new file gets `0666` minus the umask;
-  a replaced file keeps its permission bits, but becomes a new inode owned by the writer (hard
-  links to the old file keep the old contents); an existing file the caller may not write is
-  refused (`IoError`), although `rename()` could replace it; a symbolic link is followed and the
-  file it points to is replaced (a dangling link creates its target); a target that exists and
-  is not a regular file (`/dev/null`, a FIFO) is written directly; a missing or unwritable
-  directory is an `IoError` with nothing created. There is no `fsync` (there was none before):
-  the replacement is atomic for readers and for failed writes, not for a system crash. On ext4
+  directory (the name part of `out_path` shortened so the whole name fits `NAME_MAX`), created
+  exclusively (`O_EXCL`), which is closed with every error checked and then `rename()`d over
+  `out_path`. Any failure — while coding, or in the write itself (disk full, `EIO`,
+  `RLIMIT_FSIZE`) — removes the temporary file and leaves an existing `out_path` exactly as it
+  was, never truncated or half-written (before, `fopen("wb")` truncated it first). Which paths
+  can be written follows `fopen(out_path, "wb")`; how they are written differs as follows. An
+  empty path is refused (`IoError "cannot create ''"`) before any encoding work. A new file gets
+  `0666` minus the umask; a replaced file keeps its permission bits, but becomes a new inode
+  owned by the writer (hard links to the old file keep the old contents). An existing file the
+  caller may not write is refused (`IoError`), although `rename()` could replace it. A symbolic
+  link is followed and the file it points to is replaced (a dangling link creates its target);
+  a loop, or more than 40 links in a row, is an `IoError` (`ELOOP`, as for `fopen`). A target
+  that exists and is not a regular file (`/dev/null`, a FIFO) is written directly. **An
+  existing regular file the caller may write but that cannot be replaced is written in place**,
+  truncated when opened, as `fopen("wb")` did, losing only the replace-on-success guarantee: when
+  no temporary file can be created next to it (read-only directory, path too long, …), and when
+  `rename()` would be refused because the directory is sticky (`/tmp`) and neither the file nor
+  the directory belongs to the caller (checked before encoding, not discovered at the
+  `rename()`; such a file is opened without `O_CREAT`, which `fs.protected_regular` could
+  refuse). A target that does not exist in a missing or unwritable directory is an `IoError`
+  with nothing created. The `.prmd` encoder opens the output only once every block is coded,
+  so a coding failure never touches the target even then; J2K opens it before coding. There is
+  no `fsync` (there was none before): the replacement is atomic for readers and for failed
+  writes, not for a system crash. On ext4
   (default `auto_da_alloc`), replacing an existing file makes the kernel write the new file's
   data out at `rename()`, so overwriting a file is slower than writing a new one on slow storage
   (Raspberry Pi 5, SD card: full-image encode 650 ms to a new file, 1050–1080 ms over an
@@ -566,6 +579,8 @@ int choose_threads(int requested, uint64_t work);         // hardware_concurrenc
 class Pool {                       // threads − 1 workers + the caller; joined by the destructor
  public:
   explicit Pool(int threads);      // keeps the workers it could start if the system refuses more
+                                   // (std::system_error); any other exception (bad_alloc) is
+                                   // rethrown after joining the workers already started
   int size() const;
   // fn(begin, end) over chunks of [0, n), `grain` long, claimed in increasing order from an
   // atomic counter; blocks until all are done. Inline fn(0, n) when n <= grain, without
@@ -576,13 +591,14 @@ class Pool {                       // threads − 1 workers + the caller; joined
   // in serial order.
   void run(size_t n, size_t grain, const std::function<void(size_t, size_t)>& fn);
 };
-// fn(0, n) / fn(0, h) when pool is null (the serial encoder) or the loop has at most
-// kMinParallelSamples (32 Ki) samples, else pool->run.
+// fn(0, n) when pool is null (the serial encoder), else pool->run (inline when n <= grain).
 void parallel_for(Pool*, size_t n, size_t grain, fn);
+// fn(0, h) / fn(0, n) also when the loop has at most kMinParallelSamples (32 Ki) samples.
 void parallel_rows(Pool*, int h, size_t row_samples, fn); // ~16 Ki samples per row stripe
 void parallel_samples(Pool*, size_t n, fn);              // 16 Ki-sample runs
 namespace test_hooks {                                   // tests only
-void set_worker_start_limit(int k);                      // simulate refused threads after k
+enum class WorkerStartFailure { Refused, OutOfMemory };  // system_error / bad_alloc
+void set_worker_start_limit(int k, WorkerStartFailure = Refused); // fail starts after k
 void set_row_stripe_observer(void (*)(int y0, int y1));  // see which thread runs each stripe
 }
 }
@@ -590,8 +606,10 @@ void set_row_stripe_observer(void (*)(int y0, int y1));  // see which thread run
 Not work-stealing: all parallel work is flat (one level of `run`), so a shared counter is
 enough. Synchronization: one atomic word holds (job generation, free seats); a worker joins by
 taking a seat with a CAS, the caller closes the seats when no chunk is left and waits for the
-joined workers only. Idle workers spin for 100 µs, then sleep on a condition variable. No
-global state; a pool lives for one `encode_prmd` call.
+joined workers only. Idle workers spin for 100 µs, then sleep on a condition variable. No pool
+is shared: each lives for one `encode_prmd` call, so concurrent encodes do not interact. The
+only process-wide state is the two test hooks (atomics, off unless a test sets them) and a
+thread-local flag that makes a nested `run()` inline.
 
 ---
 
@@ -677,7 +695,9 @@ prmd decode <file> --level L --x X --y Y --w W --h H -o crop.png [--clamp] [--st
 prmd info <file>
         → header, level table, block counts and per-level bytes
 ```
-Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of range.
+Exit codes: 0 ok, 1 usage error, 2 I/O error, 3 format error, 4 out of range. Integer options
+must be decimal integers, with an optional `-` (no whitespace, `+` or trailing characters:
+`tools/tool_args.h`); out-of-range values are then reported by the library.
 
 ### 4.2 `prmdbench`
 ```
@@ -691,8 +711,10 @@ prmdbench <image> [--levels 5] [--iters 300] [--seed 1] [--size 4096] [--color g
 each `--codecs` codec encoded at every listed thread count (0 = automatic), median of
 3, with the threads actually used, the best speedup over the `N=1` entry wherever it is in the
 list (over the first entry, named in the header, when 1 is not listed) and a byte-identity check
-across counts. Numeric options must be whole integers in range (`1,,2`, `4x` or `-1` are usage
-errors, exit code 1).
+across counts; times below 10 ms show two decimals, below 100 ms one. Numeric options must be
+whole decimal integers in range (`1,,2`, `4x`, `+4`, ` 4` or `-1` are usage errors, exit code
+1). A missing or unreadable image, or any other failure, prints `prmdbench: <reason>` and exits
+with code 2 (`prmdpipeline` does the same).
 Unsuffixed codec names (`haar`, `naive`, …) use the default coder (zstd 1); `+range`, `+raw`, `+zstd19`
 (the previous default) variants exist for the entropy table, which compares every coder on haar, cdf53 **and naive**, so the
 "vs naive" comparison is always made with the same coder on both sides.
@@ -795,7 +817,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 | `Entropy` | What it does | Expected trade-off |
 |---|---|---|
 | `range` | the context-adaptive binary range coder described below | best ratio; decode is bit-serial (~10 instr/bit) |
-| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 1, §7.2) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4–5% (gray), +17% (RGB) at level 1 (+12% at level 19)** vs `range` |
+| `zstd` (default) | each plane is zigzag-mapped to uint16 and split into a low-byte and a high-byte plane (the high bytes are almost all 0), then all byte planes of the block are compressed as one zstd frame at `entropy_level` (default 1, §7.2) | fast, table-driven decode, mature library; no knowledge of neighbours. Estimated 15–30% larger; **measured +4% (gray), +17% (RGB) at level 1 (+12% at level 19)** vs `range` |
 | `raw` | zigzag int16, little-endian, no compression | the lower bound on decode cost and the upper bound on size; isolates how much time the entropy stage takes |
 
 - The expected trade-offs are estimates. The benchmark measures them.
@@ -833,7 +855,7 @@ The coder is **configurable per file** (`EncodeOptions::entropy`, header byte 28
 3. Encoding is offline. zstd 19 is slower to encode (gray 1.1 s vs 0.5 s; RGB 8.3 s), but that is paid once per reference image. `--entropy-level 3` gives nearly the same size (+0.1% gray) at a fraction of the encode time.
 
 **Costs accepted.**
-- About 4–5% larger gray files and about 12% larger RGB files. zstd cannot exploit the correlation between neighbouring values.
+- About 4% larger gray files and about 12% larger RGB files. zstd cannot exploit the correlation between neighbouring values.
 - On RGB, J2K (20.98 MiB) is now smaller than haar+zstd (22.92 MiB). With `range`, haar was smaller (20.52 MiB).
 
 **When to choose `range`.** When storage or transfer size dominates and crops are few or cached. The LRU cache lowers repeated-crop cost to ~0.2 ms in both cases.
@@ -925,7 +947,7 @@ The rest of this section describes the **`range`** coder.
 
 ## 9. Testing (gtest, `tests/`)
 
-874 tests, all registered with ctest through `gtest_discover_tests` (`prmd_tests`, plus
+884 tests, all registered with ctest through `gtest_discover_tests` (`prmd_tests`, plus
 `prmd_profile_tests`, which links a copy of the core built with `PRMD_PROFILE`). The suite runs
 clean under ASan + UBSan (`-DPRMD_SANITIZE=address,undefined`) and TSan
 (`-DPRMD_SANITIZE=thread`; use clang: GCC 15's libtsan crashes in `pthread_cond_wait` on
@@ -942,11 +964,12 @@ thread counts explicitly.
 | `test_blockcoder.cpp` | parameterised over every `Entropy`: round-trip of random, Laplacian-distributed and extreme values for every `Band` and 1/3 channels; truncated payload → `FormatError`; full int32 magnitudes for range; out-of-int16 → zstd/raw throw; YCoCg-R and MED round-trip |
 | `test_codec.cpp` | **crop matrix** for 11 .prmd configs (haar, cdf53, laplacian-box/gauss, naive, haar+range, cdf53+raw, naive without MED, naive without MED and YCoCg-R, haar+range without both, laplacian-box without YCoCg-R) × gray (1024², 1000×777) and RGB (512×384, 301×517) × all 5 levels: inside one block, inside one tile, across 2 tiles h/v, across 4 tiles, 4 edges, 4 corners, full level, 1×1. Plus a seeded random-crop fuzz test. Every result is an exact compare against the reference pyramid. Also: tiny images (1×1, 3×2, 17×1, 6 levels), non-default tile/cblk, encoder color conversion, **bounds** (strict throws, clamped intersects), **random access** (below), cache, **format** corruption (magic, version, color id, entropy id, flag bits, reserved bytes, huge block count, huge dimensions, too-small cblk, level table, truncation) and option validation (including geometry the level table can't hold); bounds with coordinates near `INT_MAX`; haar and cdf53 smaller than naive; the MED/YCoCg-R flags recorded in byte 30 (and not recorded for gray), and MED making naive smaller; **LRU eviction** (a 300 KiB budget, far below the working set, over 250 random crops at every level: all exact, and an evicted crop is decoded again); **corrupt payloads** with a valid index, for every config and so every coder: random bytes in every block (gray and RGB) never crash and zstd rejects every level, and blocks cut by 1 byte, half or all of their payload give `FormatError` for zstd and raw (range: no crash). These run clean under ASan + UBSan |
 | `test_lossy.cpp` | haar, cdf53, laplacian-box/gauss and haar+range × gray/RGB × Q ∈ {2, 8}: (1) every decoded level equals an **independent whole-plane simulation** of §5.2, built in the test from the exact pyramid without the codec's block, format or entropy code; (2) 150 random crops equal the crop of the full-level decode (seamless, consistent); (3) the coarsest level is exact, PSNR thresholds hold, and size decreases with Q and stays below lossless; (4) Laplacian on gray: max \|error\| ≤ Q/2 at every level for Q ∈ {2, 5, 8, 16}; quantizer bound check |
-| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection; `--no-med --no-ycocg` encodes, decodes exactly and is rejected for J2K; `--threads` rejects `-1`, `abc`, `1.5`, a missing value, and writes the `--threads 1` file for 0, 2, 3, 16, 1000; `--threads 1` (and the automatic default on a small image) prints exactly the report lines of the encoder before threading, a multithreaded encode adds only `threads N` |
+| `test_cli.cpp` | the `prmd` executable as a child process: exit codes 0 (encode, decode, info, help, J2K encode), 1 (usage: missing or unknown command and options, bad choices, invalid numbers such as `--x ""`, `12abc`, `+10`, ` 10`, `4294967296`, `--j2k-lossy-psnr 1e999`), 2 (missing input, unwritable output), 3 (bad header, truncated data), 4 (out of range, including `--x 2147483647` and `--w 2147483647`, bad level, empty rect); the written PNG equals the reference crop; `--clamp` writes the intersection; `--no-med --no-ycocg` encodes, decodes exactly and is rejected for J2K; `--threads` rejects `-1`, `abc`, `1.5`, a missing value, and writes the `--threads 1` file for 0, 2, 3, 16, 1000; `--threads 1` (and the automatic default on a small image) prints exactly the report lines of the encoder before threading, a multithreaded encode adds only `threads N` |
 | `test_j2k.cpp` | gray/RGB × 256/1024 tiles: L0 lossless vs source; 150 random crops + edges/corners at every level vs J2K's own full-level decode; TLM single-tile crop reads < ¼ of the file; bounds |
-| `test_parallel.cpp` | the thread pool: `validate_threads`, `resolve_threads` (0, hardware 0, negative, clamping to 256); `auto_threads` / `choose_threads` as pure functions (1 below 4 grains, exact ⌊√⌋ over a wide range, monotone, capped by the hardware and 256, only 0 automatic); every index of [0, n) exactly once for 1–16 threads and several grains; inline single-call execution for 1 thread, small jobs and loops of ≤ 32 Ki samples; zero and one item; more threads than items; results identical for every thread count; the lowest failing index's exception under random delays and inside chunks; reuse across 300 runs and after exceptions; 3000 back-to-back small jobs with workers spinning or asleep; nested `run`; **refused threads** (test hook: the system "fails" to start a thread after k workers) give a pool of k + 1 that still covers every index and keeps the exception order; row stripes, and that they run on more than one thread |
-| `test_threads.cpp` | the multithreaded encoder over a 265-case matrix (`thread_matrix.h`: 12 modes incl. both downsamplers, all coders, no-MED/no-YCoCg × gray/RGB × 1×1, 3×2, 17×1, 1×23, single-block, many-block, odd and 1000×777 sizes; lossy steps 1/3/8; zstd 3/19/22; 1 and 8 levels; cblk 16 and 4096; encoder colour conversion; full-range noise; integer-only images): **golden hashes** of the serial encoder before threading (fc0a629) and **identical files** at 2, 3, 7, 16, 0 (automatic) and 1000 threads; `threads = 1` codes every block on the calling thread and starts no thread (`/proc/self/task`), 4 threads start exactly 3 and join them; **automatic count**: work units grow with size, channels and mode/coder cost, small images use 1 thread and start none, a 2400×1800 RGB image uses several (≤ hardware) with the serial file, the choice is the same on every run; `EncodeReport::threads`, clamping to blocks and 256, negative counts rejected without a file; **refused threads**: an encode with 1–3 threads instead of 4 or 16 reports them and writes the golden file; parallel `forward`, downsamplers, Laplacian upsampler and fused `to_planes` equal the serial ones, and their row stripes run on several threads (test hook); `uninitialized_samples` leaves only its own elements uninitialized (resize after a move zeroes); multithreaded files decode to the reference pyramid; four user threads encoding at once; **fault injection** (a coder that throws for some blocks): same exception at every thread count, no file or temporary file left, an existing file untouched, early stop; the **data-size limit** (lowered through `encode_prmd`'s `max_data_bytes`): the same "exceeds 4 GiB" error at every count after coding far fewer than all blocks, and coder failure vs limit in serial order; a **write that fails part-way** (forked child with `RLIMIT_FSIZE`, `SIGXFSZ` ignored) leaves the old file intact and no temporary file, for `.prmd` (1 and 4 threads) and J2K; J2K files identical across thread counts and its per-tile thread cap |
-| `test_output_file.cpp` | the replace-on-success output file: temporary file named `<target>.tmp.<pid>.<random>` and renamed on commit; abandoned or failed writes leave the target and no temporary file; umask permissions for new files, kept permission bits for replaced ones; symbolic links followed (also dangling ones); missing or unwritable directory → `IoError` with nothing created, also through both encoders; read-only target not replaced; `/dev/null` written directly and left a device; a directory target rejected; `EncodeReport::file_bytes` equals the file written |
+| `test_parallel.cpp` | the thread pool: `validate_threads`, `resolve_threads` (0, hardware 0, negative, clamping to 256); `auto_threads` / `choose_threads` as pure functions (1 below 4 grains, exact ⌊√⌋ over a wide range, monotone, capped by the hardware and 256, only 0 automatic); every index of [0, n) exactly once for 1–16 threads and several grains; inline single-call execution for 1 thread, small jobs and loops of ≤ 32 Ki samples; zero and one item; more threads than items; results identical for every thread count; the lowest failing index's exception under random delays and inside chunks; reuse across 300 runs and after exceptions; 3000 back-to-back small jobs with workers spinning or asleep; nested `run`; **refused threads** (test hook: the system "fails" to start a thread after k workers) give a pool of k + 1 that still covers every index and keeps the exception order; another exception there (`std::bad_alloc`, same hook) leaves the constructor with the workers joined; row stripes, and that they run on more than one thread |
+| `test_threads.cpp` | the multithreaded encoder over a 265-case matrix (`thread_matrix.h`: 12 modes incl. both downsamplers, all coders, no-MED/no-YCoCg × gray/RGB × 1×1, 3×2, 17×1, 1×23, single-block, many-block, odd and 1000×777 sizes; lossy steps 1/3/8; zstd 3/19/22; 1 and 8 levels; cblk 16 and 4096; encoder colour conversion; full-range noise; integer-only images): **golden hashes** of the serial encoder before threading (fc0a629) and **identical files** at 2, 3, 7, 16, 0 (automatic) and 1000 threads; `threads = 1` codes every block on the calling thread and starts no thread (no new id in `/proc/self/task` while blocks are coded), 4 threads start exactly 3 and join them; **automatic count**: work units grow with size, channels and mode/coder cost, small images use 1 thread and start none, a 2400×1800 RGB image uses several (≤ hardware) with the serial file, the choice is the same on every run; `EncodeReport::threads`, clamping to blocks and 256, negative counts rejected without a file; **refused threads**: an encode with 1–3 threads instead of 4 or 16 reports them and writes the golden file, and `std::bad_alloc` while starting workers fails the encode with the old file intact; parallel `forward`, downsamplers, Laplacian upsampler and fused `to_planes` equal the serial ones, and their row stripes run on several threads (test hook); `uninitialized_samples` leaves only its own elements uninitialized (resize after a move zeroes); multithreaded files decode to the reference pyramid; four user threads encoding at once; **fault injection** (a coder that throws for some blocks): same exception at every thread count, no file or temporary file left, an existing file untouched, early stop; the **data-size limit** (lowered through `encode_prmd`'s `max_data_bytes`): the same "exceeds 4 GiB" error at every count after coding far fewer than all blocks, and coder failure vs limit in serial order; a **write that fails part-way** (forked child with `RLIMIT_FSIZE`, `SIGXFSZ` ignored) leaves the old file intact and no temporary file, for `.prmd` (1 and 4 threads) and J2K; J2K files identical across thread counts and its per-tile thread cap |
+| `test_output_file.cpp` | the replace-on-success output file: temporary file named `<target>.tmp.<pid>.<random>` and renamed on commit; abandoned or failed writes leave the target and no temporary file; umask permissions for new files, kept permission bits for replaced ones; symbolic links followed (also dangling ones); missing or unwritable directory → `IoError` with nothing created, also through both encoders; a writable file in a read-only directory written in place (and through both encoders); a 250- and a 255-byte name get a shortened temporary name in the same directory; symbolic-link loops → `IoError`, links left as they are, while a chain of 40 links works; the empty path → `IoError` before any block is coded or row transformed; read-only target not replaced; `/dev/null` written directly and left a device; a directory target rejected; `EncodeReport::file_bytes` equals the file written |
+| `test_tool_args.cpp` | `tools/tool_args.h`: integers are digits with an optional `-` only where the range allows negatives (no whitespace, `+`, `0x`, trailing characters), range checks, comma lists; `prmdbench` and `prmdpipeline` exit with an error message (code 2) on a missing image and with 1 on `+5`-style numbers |
 | `test_profile.cpp` | (`prmd_profile_tests`) worker `PRMD_TIMED` scopes merged under the caller's scope with complete call counts, `worker_calls`/`worker_ms`, wall vs summed time, scopes opened only on workers, reset; a 4-thread encode has the same tree and call counts as a serial one; **entry order**: nested scopes first created in different chunks, under random delays, give the serial order on 20 runs at 2, 4 and 8 threads, and multithreaded encodes list their steps in the serial order |
 
 **Random-access proof** (`test_codec.cpp`, every .prmd config):
@@ -1013,6 +1036,7 @@ tests/                         reference.{h,cpp} test_util.h thread_matrix.h tes
                                test_rangecoder.cpp test_transform.cpp test_blockcoder.cpp test_codec.cpp
                                test_lossy.cpp test_j2k.cpp test_cli.cpp test_parallel.cpp
                                test_threads.cpp test_profile.cpp test_output_file.cpp
+                               test_tool_args.cpp
 build/bench/                   benchmark output, git-ignored: reports results*.md, level-3 samples in samples/
 docs/design.md                 this document
 docs/writeup.md                results write-up (1–2 pages)
