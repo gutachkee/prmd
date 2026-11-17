@@ -679,6 +679,7 @@ EncodeReport encode_prmd(const Image& src,
                          opts.levels, opts.tile, opts.cblk)) {
     throw std::invalid_argument(std::string("image geometry: ") + why);
   }
+  check_output_path(path);  // before any work: the file is made at the end
   const int channels = prmd::channels(opts.color);
 
   std::unique_ptr<LevelTransform> xf;

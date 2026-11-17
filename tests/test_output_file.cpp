@@ -1,9 +1,11 @@
 // Encoder output files (include/prmd/internal/output_file.h): written to a
 // temporary file and renamed over the target only when complete, so a
 // failed encode never truncates or half-writes an existing file; fopen-like
-// permissions, symbolic links followed, non-regular targets written
-// directly. Write failures part-way through an encode:
-// tests/test_threads.cpp, ThreadsErrors.WriteFailureLeavesTheExistingFileIntact.
+// permissions, symbolic links followed (loops refused), non-regular targets
+// and writable files that cannot be replaced written in place, temporary
+// names that fit NAME_MAX, the empty path refused before any work. Write
+// failures part-way through an encode: tests/test_threads.cpp,
+// ThreadsErrors.WriteFailureLeavesTheExistingFileIntact.
 
 #include <gtest/gtest.h>
 
@@ -11,14 +13,20 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "prmd/crop_decoder.h"
 #include "prmd/encoder.h"
 #include "prmd/errors.h"
+#include "prmd/internal/blockcoder.h"
 #include "prmd/internal/output_file.h"
+#include "prmd/internal/parallel.h"
+#include "prmd/internal/prmd_codec.h"
 #include "reference.h"
 #include "test_util.h"
 
@@ -184,25 +192,214 @@ TEST(OutputFile, MissingOrUnwritableDirectoryIsAnErrorWithNoFileLeft) {
   if (is_root()) {
     GTEST_SKIP() << "root ignores directory permissions";
   }
+  // A new file in a read-only directory cannot be created at all.
   const fs::path ro = d / "ro";
   fs::create_directories(ro);
   testutil::write_file((ro / "old.prmd").string(), {'o', 'l', 'd'});
   ASSERT_EQ(::chmod(ro.c_str(), 0555), 0);
-  for (const char* name : {"new.prmd", "old.prmd"}) {
-    EXPECT_THROW(OutputFile((ro / name).string()), IoError) << name;
+  try {
+    OutputFile f((ro / "new.prmd").string());
+    ADD_FAILURE() << "created a file in a read-only directory";
+  } catch (const IoError& e) {
+    EXPECT_EQ(std::string(e.what()),
+              "cannot create '" + (ro / "new.prmd").string() + "'");
   }
   // Through the encoder too, both codecs.
   const Image img = ref::synthetic_image(64, 48, ColorFormat::Gray8, 3);
   EncodeOptions o;
   o.levels = 3;
-  EXPECT_THROW(encode_file(img, (ro / "old.prmd").string(), Codec::Prmd, o),
+  EXPECT_THROW(encode_file(img, (ro / "new.prmd").string(), Codec::Prmd, o),
                IoError);
-  EXPECT_THROW(encode_file(img, (ro / "old.j2k").string(), Codec::J2K, o),
+  EXPECT_THROW(encode_file(img, (ro / "new.j2k").string(), Codec::J2K, o),
                IoError);
   EXPECT_THROW(encode_file(img, missing.string(), Codec::Prmd, o), IoError);
   EXPECT_EQ(names_in(ro), std::vector<std::string>{"old.prmd"});
   EXPECT_EQ(read_text(ro / "old.prmd"), "old");
   ASSERT_EQ(::chmod(ro.c_str(), 0755), 0);
+}
+
+TEST(OutputFile, WritableFileInAReadOnlyDirectoryIsWrittenInPlace) {
+  if (is_root()) {
+    GTEST_SKIP() << "root ignores directory permissions";
+  }
+  // No temporary file can be made next to it, but fopen("wb") could write
+  // it: it is written in place, without the replace-on-success guarantee.
+  const fs::path ro = fresh_dir("of_ro_inplace");
+  const fs::path target = ro / "old.prmd";
+  testutil::write_file(target.string(), {'o', 'l', 'd'});
+  ASSERT_EQ(::chmod(target.c_str(), 0640), 0);
+  testutil::write_file((ro / "old.j2k").string(), {'o', 'l', 'd'});
+  ASSERT_EQ(::chmod(ro.c_str(), 0555), 0);
+  struct Restore {
+    fs::path d;
+    ~Restore() { ::chmod(d.c_str(), 0755); }
+  } restore{ro};
+  {
+    OutputFile f(target.string());
+    EXPECT_EQ(f.write_path(), target.string());
+    write_all(f, "new contents");
+    EXPECT_EQ(f.commit(), 12u);
+  }
+  EXPECT_EQ(read_text(target), "new contents");
+  EXPECT_EQ(mode_of(target), 0640u);  // the same file
+  // A failed write leaves what fopen("wb") would: the file truncated or
+  // partial, and no other file.
+  {
+    OutputFile f(target.string());
+    write_all(f, "part");
+    f.fail();
+    EXPECT_THROW(f.commit(), IoError);
+  }
+  EXPECT_TRUE(fs::is_regular_file(target));
+
+  // Through both encoders: the files decode.
+  const Image img = ref::synthetic_image(64, 48, ColorFormat::Gray8, 3);
+  EncodeOptions o;
+  o.levels = 3;
+  for (const Codec codec : {Codec::Prmd, Codec::J2K}) {
+    const fs::path p = ro / (codec == Codec::Prmd ? "old.prmd" : "old.j2k");
+    const EncodeReport r = encode_file(img, p.string(), codec, o);
+    EXPECT_EQ(fs::file_size(p), r.file_bytes);
+    EXPECT_EQ(open_decoder(p.string())->decode(0, {0, 0, 64, 48}).image.pixels,
+              img.pixels);
+  }
+  EXPECT_EQ(names_in(ro), (std::vector<std::string>{"old.j2k", "old.prmd"}));
+}
+
+TEST(OutputFile, LongNamesGetAShortenedTemporaryName) {
+  // "<name>.tmp.<pid>.<16 hex>" would exceed NAME_MAX (255) for a 250-byte
+  // name: the temporary name keeps a prefix of it, in the same directory.
+  const fs::path d = fresh_dir("of_long");
+  const std::string name(250, 'n');
+  const fs::path target = d / name;
+  for (int round = 0; round < 2; ++round) {  // a new file, then a replaced one
+    OutputFile f(target.string());
+    const fs::path tmp = f.write_path();
+    EXPECT_NE(tmp, target);
+    EXPECT_EQ(tmp.parent_path(), d);
+    EXPECT_LE(tmp.filename().string().size(), 255u);
+    EXPECT_EQ(tmp.filename().string().rfind(name.substr(0, 200), 0), 0u);
+    write_all(f, round == 0 ? "first" : "second");
+    f.commit();
+    EXPECT_EQ(names_in(d), std::vector<std::string>{name});
+  }
+  EXPECT_EQ(read_text(target), "second");
+  // The longest name works too, and through the encoder.
+  const fs::path longest = d / std::string(255, 'm');
+  const Image img = ref::synthetic_image(64, 48, ColorFormat::Gray8, 3);
+  EncodeOptions o;
+  o.levels = 3;
+  const EncodeReport r = encode_file(img, longest.string(), Codec::Prmd, o);
+  EXPECT_EQ(fs::file_size(longest), r.file_bytes);
+  EXPECT_EQ(names_in(d).size(), 2u);
+}
+
+TEST(OutputFile, SymbolicLinkLoopIsAnError) {
+  // fopen fails with ELOOP; the link must not be replaced by a file.
+  const fs::path d = fresh_dir("of_loop");
+  fs::create_symlink("b", d / "a");
+  fs::create_symlink("a", d / "b");
+  fs::create_symlink("self", d / "self");
+  for (const char* name : {"a", "self"}) {
+    const fs::path p = d / name;
+    try {
+      OutputFile f(p.string());
+      ADD_FAILURE() << "opened a symbolic link loop: " << name;
+    } catch (const IoError& e) {
+      EXPECT_EQ(std::string(e.what()), "cannot create '" + p.string() + "'");
+    }
+  }
+  const Image img = ref::synthetic_image(64, 48, ColorFormat::Gray8, 3);
+  EncodeOptions o;
+  o.levels = 3;
+  EXPECT_THROW(encode_file(img, (d / "a").string(), Codec::Prmd, o), IoError);
+  EXPECT_THROW(encode_file(img, (d / "self").string(), Codec::J2K, o), IoError);
+  EXPECT_TRUE(fs::is_symlink(d / "a"));
+  EXPECT_TRUE(fs::is_symlink(d / "b"));
+  EXPECT_TRUE(fs::is_symlink(d / "self"));
+  EXPECT_EQ(names_in(d), (std::vector<std::string>{"a", "b", "self"}));
+
+  // A chain of 40 links (the kernel's limit) still reaches its file.
+  testutil::write_file((d / "end").string(), {'o'});
+  std::string next = "end";
+  for (int i = 0; i < 40; ++i) {
+    const std::string link = "l" + std::to_string(i);
+    fs::create_symlink(next, d / link);
+    next = link;
+  }
+  {
+    OutputFile f((d / next).string());
+    write_all(f, "via 40 links");
+    f.commit();
+  }
+  EXPECT_EQ(read_text(d / "end"), "via 40 links");
+  EXPECT_TRUE(fs::is_symlink(d / next));
+}
+
+namespace {
+
+// zstd coder that counts the blocks it codes.
+class CountingCoder final : public internal::BlockCoder {
+ public:
+  CountingCoder() : inner_(internal::make_block_coder(Entropy::Zstd)) {}
+  Entropy id() const override { return Entropy::Zstd; }
+  void encode(const internal::BlockPlanes& in,
+              std::vector<uint8_t>& out) const override {
+    blocks.fetch_add(1);
+    inner_->encode(in, out);
+  }
+  void decode(const uint8_t* d,
+              size_t n,
+              internal::BlockPlanes& io) const override {
+    inner_->decode(d, n, io);
+  }
+  mutable std::atomic<int> blocks{0};
+
+ private:
+  std::unique_ptr<internal::BlockCoder> inner_;
+};
+
+std::atomic<int> g_stripes{0};
+void count_stripe(int, int) {
+  g_stripes.fetch_add(1);
+}
+
+}  // namespace
+
+TEST(OutputFile, EmptyPathFailsBeforeAnyWork) {
+  try {
+    OutputFile f("");
+    ADD_FAILURE() << "opened ''";
+  } catch (const IoError& e) {
+    EXPECT_EQ(std::string(e.what()), "cannot create ''");
+  }
+  // The encoders check the path before converting or coding anything.
+  const Image img = ref::synthetic_image(600, 400, ColorFormat::RGB8, 3);
+  EncodeOptions o;
+  o.levels = 3;
+  o.color = ColorFormat::RGB8;
+  struct Reset {
+    ~Reset() { internal::test_hooks::set_row_stripe_observer(nullptr); }
+  } reset;
+  g_stripes = 0;
+  internal::test_hooks::set_row_stripe_observer(count_stripe);
+  for (const int threads : {1, 4}) {
+    o.threads = threads;
+    const CountingCoder coder;
+    try {
+      internal::encode_prmd(img, "", o, &coder);
+      ADD_FAILURE() << "encoded to ''";
+    } catch (const IoError& e) {
+      EXPECT_EQ(std::string(e.what()), "cannot create ''");
+    }
+    EXPECT_EQ(coder.blocks.load(), 0) << threads;
+    EXPECT_EQ(g_stripes.load(), 0) << threads;
+    EXPECT_THROW(encode_file(img, "", Codec::Prmd, o), IoError);
+    EXPECT_THROW(encode_file(img, "", Codec::J2K, o), IoError);
+  }
+  // Invalid options are still reported first, as before.
+  o.levels = 0;
+  EXPECT_THROW(encode_file(img, "", Codec::Prmd, o), std::invalid_argument);
 }
 
 TEST(OutputFile, ReadOnlyFileIsNotReplaced) {

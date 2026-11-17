@@ -531,6 +531,7 @@ EncodeReport encode_j2k(const Image& src_in,
   if (src_in.width <= 0 || src_in.height <= 0) {
     throw std::invalid_argument("empty source image");
   }
+  check_output_path(path);
 
   const Image src = convert(src_in, o.color);
   opj_cparameters_t params = make_encoder_params(o, src.channels());
