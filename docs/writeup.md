@@ -61,6 +61,8 @@ Mean / p95 latency and bytes read per crop (block data, not counting the index):
 
 **Decode speed vs. size.** zstd level 1 encodes 13–36× faster than level 19 on one thread (6–21× with threads) and gives the same gray lossless size (RGB and lossy files are 3–12% larger). The range coder would save 4–5% at 12× the decode time; crop latency matters more than 4% of storage here.
 
+**Multithreaded encoder.** The encoder codes blocks and transform row stripes on a thread pool whose size it picks from the image's work, with no format change and a byte-identical file for every thread count. On the 14-core MacBook Pro the 4096² gray pyramid encodes in 72 → 20 ms, RGB in 288 → 64 ms and the full 8824×5336 image in 237 → 58 ms; on the 4-core Pi 5, 4096² gray goes from 217 to 96 ms.
+
 **Level definition.** `haar` levels are the exact 2×2 mean but alias; `cdf53` and `laplacian-gauss` are sharper or smoother and differ from the 2×2 mean by 24–30 dB PSNR. The matcher's needs should decide the mode. `cdf53` crops cost 1.1–1.2× `haar`'s.
 
 **PSNR.** Lossless files decode every level bit for bit (∞ dB). With `--quant`, `cdf53` is the best `.prmd` mode (41.9 dB at 3.53 bits/px for Q = 4, 2–4 dB above `haar`), `laplacian` is the only one with a guaranteed per-pixel bound (±Q/2), and JPEG2000 still wins rate–distortion by about 3 dB. The 24–30 dB between `cdf53`/`gauss` levels and the 2×2 mean measures a different filter, not lower quality. [modes.md](modes.md#modes-and-psnr) explains every mode in terms of PSNR.
