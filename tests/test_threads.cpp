@@ -1341,6 +1341,27 @@ TEST(ThreadsFallback, FewerWorkersThanRequestedStillWriteTheSameFile) {
   EXPECT_EQ(encode_case(c, 4, "nofallback").report.threads, 4);
 }
 
+TEST(ThreadsFallback, OtherThreadStartFailuresFailTheEncode) {
+  // std::bad_alloc while starting workers (test hook) is not a refused
+  // thread: the encode fails with it, the workers started are joined, and
+  // an existing file is left as it was.
+  struct Reset {
+    ~Reset() { internal::test_hooks::set_worker_start_limit(-1); }
+  } reset;
+  const Case c = case_named("cdf53_1000x777_rgb");
+  const std::string path = testutil::temp_path("start_oom.prmd").string();
+  testutil::write_file(path, {'o', 'l', 'd'});
+  internal::test_hooks::set_worker_start_limit(
+      1, internal::test_hooks::WorkerStartFailure::OutOfMemory);
+  EncodeOptions o = c.opts;
+  o.threads = 4;
+  EXPECT_THROW(encode_file(source_of(c), path, Codec::Prmd, o),
+               std::bad_alloc);
+  EXPECT_EQ(testutil::read_file(path), (std::vector<char>{'o', 'l', 'd'}));
+  internal::test_hooks::set_worker_start_limit(-1);
+  EXPECT_EQ(encode_case(c, 4, "after_oom").hash, golden().at(c.name));
+}
+
 // ----------------------------------------------------------------------------
 // J2K
 

@@ -12,8 +12,11 @@
 //
 // Wake-ups: run() wakes only as many workers as the job has chunks beyond
 // the caller's first, and a worker that wakes after every chunk has been
-// claimed does not join, so run() never waits for a worker that had nothing
-// left to do (thread wake-up latency is tens of microseconds).
+// claimed does not join, so run() does not wait for workers that arrive
+// after the seats are closed (thread wake-up latency is tens of
+// microseconds). It does wait for every worker that took a seat: one that
+// is preempted after joining, even if it then finds no chunk left, can
+// delay it.
 //
 // Determinism of failures: if chunks throw, the exception of the LOWEST
 // failing chunk is rethrown on the calling thread once all workers are idle.
@@ -79,8 +82,10 @@ class Pool {
 
   // A pool of `threads` threads in total: the caller plus threads - 1
   // workers, started here and joined by the destructor. threads <= 1 starts
-  // none. If the system refuses to start a thread, the pool keeps the ones it
-  // has (size() tells how many); the caller thread alone always works.
+  // none. If the system refuses to start a thread (std::system_error), the
+  // pool keeps the ones it has (size() tells how many); the caller thread
+  // alone always works. Any other exception while starting them
+  // (std::bad_alloc) is rethrown once the workers started are joined.
   explicit Pool(int threads);
   ~Pool();
   Pool(const Pool&) = delete;
@@ -98,6 +103,8 @@ class Pool {
   void run(size_t n, size_t grain, const Fn& fn);
 
  private:
+  void stop_and_join();
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
@@ -131,10 +138,16 @@ void parallel_samples(Pool* pool, size_t n, const Pool::Fn& fn);
 // Test hooks (tests/test_parallel.cpp, tests/test_threads.cpp). Process-wide;
 // off unless a test sets them, and not for use outside tests.
 namespace test_hooks {
+// How a worker start beyond the limit fails: Refused throws
+// std::system_error, as std::thread does when the system refuses a thread
+// (the pool keeps the workers it has); OutOfMemory throws std::bad_alloc
+// (the Pool constructor joins the workers it started and rethrows).
+enum class WorkerStartFailure { Refused, OutOfMemory };
 // Pools start at most `k` worker threads from now on: starting the next one
-// fails as if the system refused (std::system_error), exercising the
-// fewer-threads fallback. k < 0 turns the limit off (the default).
-void set_worker_start_limit(int k);
+// fails as `failure` says, exercising the fewer-threads fallback (or the
+// failed constructor). k < 0 turns the limit off (the default).
+void set_worker_start_limit(
+    int k, WorkerStartFailure failure = WorkerStartFailure::Refused);
 // Called with every row stripe parallel_rows hands out (on the thread that
 // runs it, before fn); nullptr turns it off (the default).
 using RowStripeObserver = void (*)(int y0, int y1);

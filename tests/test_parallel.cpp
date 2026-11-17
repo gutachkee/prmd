@@ -11,6 +11,7 @@
 #include <climits>
 #include <cstdint>
 #include <mutex>
+#include <new>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -416,6 +417,27 @@ TEST(Pool, FewerThreadsWhenWorkersCannotBeStarted) {
       EXPECT_STREQ(e.what(), "7");
     }
   }
+  test_hooks::set_worker_start_limit(-1);
+  EXPECT_EQ(Pool(8).size(), 8);
+}
+
+TEST(Pool, OtherStartFailuresJoinTheStartedWorkersAndRethrow) {
+  // Not a refused thread (std::system_error) but, e.g., std::bad_alloc
+  // after k workers started: the constructor joins them (a joinable
+  // std::thread destroyed would call std::terminate) and rethrows.
+  struct Reset {
+    ~Reset() { test_hooks::set_worker_start_limit(-1); }
+  } reset;
+  for (const int k : {0, 1, 3}) {
+    test_hooks::set_worker_start_limit(
+        k, test_hooks::WorkerStartFailure::OutOfMemory);
+    EXPECT_THROW(Pool(8), std::bad_alloc) << k;
+  }
+  // Only a start beyond the limit fails.
+  test_hooks::set_worker_start_limit(
+      2, test_hooks::WorkerStartFailure::OutOfMemory);
+  EXPECT_THROW(Pool(4), std::bad_alloc);
+  EXPECT_EQ(Pool(3).size(), 3);
   test_hooks::set_worker_start_limit(-1);
   EXPECT_EQ(Pool(8).size(), 8);
 }

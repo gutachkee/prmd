@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <exception>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -36,12 +37,15 @@ struct InRun {
 };
 
 std::atomic<int> g_worker_start_limit{-1};
+std::atomic<test_hooks::WorkerStartFailure> g_worker_start_failure{
+    test_hooks::WorkerStartFailure::Refused};
 std::atomic<test_hooks::RowStripeObserver> g_row_observer{nullptr};
 
 }  // namespace
 
 namespace test_hooks {
-void set_worker_start_limit(int k) {
+void set_worker_start_limit(int k, WorkerStartFailure failure) {
+  g_worker_start_failure.store(failure);
   g_worker_start_limit.store(k);
 }
 void set_row_stripe_observer(RowStripeObserver observer) {
@@ -98,8 +102,9 @@ int choose_threads(int requested, uint64_t work) {
 // the current one. A worker joins by taking a seat with a CAS on that word,
 // which also tells it which job it joined; `active` counts workers that
 // joined (or are about to) and have not finished. The caller closes the job
-// (seats = 0) once it finds no chunk left, then waits for active == 0, so
-// it never waits for a worker that would only have found nothing to do.
+// (seats = 0) once it finds no chunk left, then waits for active == 0: it
+// does not wait for workers that arrive after that, only for those that
+// took a seat (one preempted after taking it can still delay the caller).
 //
 // Idle workers first spin for kSpin, checking the word, then sleep on
 // `wake`: stages follow each other within microseconds, and a spinning
@@ -296,9 +301,13 @@ Pool::Pool(int threads) : impl_(std::make_unique<Impl>()) {
 #endif
   impl_->threads.reserve(size_t(workers));
   const int limit = g_worker_start_limit.load();
+  const auto failure = g_worker_start_failure.load();
   for (int i = 0; i < workers; ++i) {
     try {
       if (limit >= 0 && i >= limit) {
+        if (failure == test_hooks::WorkerStartFailure::OutOfMemory) {
+          throw std::bad_alloc();
+        }
         throw std::system_error(
             std::make_error_code(std::errc::resource_unavailable_try_again),
             "worker start limit (test hook)");
@@ -308,17 +317,28 @@ Pool::Pool(int threads) : impl_(std::make_unique<Impl>()) {
       });
     } catch (const std::system_error&) {
       break;  // run with the threads we have
+    } catch (...) {
+      // Anything else (std::bad_alloc) fails the pool: the workers already
+      // started must be joined before their Impl goes away.
+      stop_and_join();
+      throw;
+    }
+  }
+}
+
+void Pool::stop_and_join() {
+  impl_->stop.store(true, std::memory_order_seq_cst);
+  { const std::lock_guard<std::mutex> lock(impl_->m); }
+  impl_->wake.notify_all();
+  for (std::thread& t : impl_->threads) {
+    if (t.joinable()) {
+      t.join();
     }
   }
 }
 
 Pool::~Pool() {
-  impl_->stop.store(true, std::memory_order_seq_cst);
-  { const std::lock_guard<std::mutex> lock(impl_->m); }
-  impl_->wake.notify_all();
-  for (std::thread& t : impl_->threads) {
-    t.join();
-  }
+  stop_and_join();
 }
 
 int Pool::size() const {
@@ -370,7 +390,7 @@ void Pool::run(size_t n, size_t grain, const Fn& fn) {
 
   // Every chunk is claimed (or the job was cancelled): a worker that has not
   // joined yet would find nothing to do, so close the seats and wait only
-  // for those that joined.
+  // for those that took one.
   // An RMW, so that it reads every seat taken before it: the takers'
   // increments of `active` are then visible below.
   s.word.exchange(pack(generation, 0), std::memory_order_seq_cst);
