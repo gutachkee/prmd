@@ -145,11 +145,14 @@ TEST(Cli, InvalidNumbersAreUsageErrors) {
   const CliFiles& f = files();
   const std::string out = testutil::temp_path("cli_num.png").string();
   for (const char* bad : {"", "12abc", "abc", "1.5", " ", "4294967296",
-                          "-2147483649", "99999999999999999999"}) {
+                          "-2147483649", "99999999999999999999", "+10",
+                          " 10", "\t10", "10 ", "-", "--1", "0x10"}) {
     EXPECT_EQ(run_cli(decode_args(f.prmd, "0", bad, "0", "8", "8", out)), 1)
         << "--x '" << bad << "'";
   }
   EXPECT_EQ(run_cli({"encode", f.png, out, "--levels", "5x"}), 1);
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--levels", "+3"}), 1);
+  EXPECT_EQ(run_cli({"encode", f.png, out, "--threads", " 2"}), 1);
   EXPECT_EQ(run_cli({"encode", f.png, testutil::temp_path("n.j2k").string(),
                      "--codec", "j2k", "--j2k-lossy-psnr", "40dB"}),
             1);

@@ -108,13 +108,18 @@ if(PRMD_BUILD_TESTS)
     tests/test_parallel.cpp
     tests/test_threads.cpp
     tests/test_output_file.cpp
+    tests/test_tool_args.cpp
     tests/reference.cpp
   )
   add_executable(prmd_tests ${PRMD_TEST_SOURCES})
   target_link_libraries(prmd_tests PRIVATE prmd_core GTest::gtest GTest::gtest_main)
-  # test_cli.cpp runs the `prmd` executable as a child process.
-  add_dependencies(prmd_tests prmd)
-  target_compile_definitions(prmd_tests PRIVATE PRMD_CLI_PATH="$<TARGET_FILE:prmd>")
+  # test_cli.cpp and test_tool_args.cpp run the tools as child processes;
+  # test_tool_args.cpp includes tools/tool_args.h.
+  add_dependencies(prmd_tests prmd prmdbench prmdpipeline)
+  target_include_directories(prmd_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+  target_compile_definitions(prmd_tests PRIVATE PRMD_CLI_PATH="$<TARGET_FILE:prmd>"
+                             PRMD_BENCH_PATH="$<TARGET_FILE:prmdbench>"
+                             PRMD_PIPELINE_PATH="$<TARGET_FILE:prmdpipeline>")
   include(GoogleTest)
   gtest_discover_tests(prmd_tests DISCOVERY_TIMEOUT 60)
 

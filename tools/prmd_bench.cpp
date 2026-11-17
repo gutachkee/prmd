@@ -969,7 +969,10 @@ void scaling_table(Run& run, std::ostringstream& md) {
         identical = false;
       }
       ms[k] = t_ms;
-      row.push_back(fmt("%.0f ms", t_ms) +
+      // Small times need more digits to show a speedup.
+      const char* const prec =
+          t_ms < 10 ? "%.2f ms" : t_ms < 100 ? "%.1f ms" : "%.0f ms";
+      row.push_back(fmt(prec, t_ms) +
                     (r.threads != counts[k] ? " (" + std::to_string(r.threads) +
                                                   " used)"
                                             : ""));
@@ -1031,8 +1034,7 @@ void run_color(const Args& a,
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  const Args a = parse(argc, argv);
+int bench_main(const Args& a) {
   const Image src = load_image(a.image);
 
   std::ostringstream md;
@@ -1071,4 +1073,15 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "wrote %s\n", a.out.c_str());
   }
   return 0;
+}
+
+int main(int argc, char** argv) {
+  const Args a = parse(argc, argv);
+  try {
+    return bench_main(a);
+  } catch (const std::exception& e) {
+    // A missing or unreadable image (IoError), a bad option, a failed write.
+    std::fprintf(stderr, "prmdbench: %s\n", e.what());
+    return 2;
+  }
 }

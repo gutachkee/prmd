@@ -22,6 +22,7 @@
 #include "prmd/image_io.h"
 #include "prmd/internal/parallel.h"
 #include "prmd/internal/prmd_format.h"
+#include "tool_args.h"
 
 using namespace prmd;
 
@@ -94,10 +95,15 @@ struct Args {
       return def;
     }
     const std::string& s = kv.at(k);
+    // Negative values are accepted here (--x/--y with --clamp) and range
+    // checked by the library: out of range (4) or invalid (1, --threads).
+    if (!tools::is_decimal_integer(s, true)) {
+      throw UsageError("--" + k + " expects an integer, got '" + s + "'");
+    }
     char* end = nullptr;
     errno = 0;
     const long long v = std::strtoll(s.c_str(), &end, 10);
-    if (s.empty() || end == s.c_str() || *end != 0) {
+    if (end == s.c_str() || *end != 0) {
       throw UsageError("--" + k + " expects an integer, got '" + s + "'");
     }
     if (errno == ERANGE || v < INT_MIN || v > INT_MAX) {
