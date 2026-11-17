@@ -10,7 +10,7 @@ All numbers come from `prmdbench`: the aerial test JPEG converted to gray and ce
 |---|---|
 | machine | MacBook Pro, Apple Silicon (14 cores), Linux VM, AArch64 |
 | compiler | GCC 15.2, Release `-O2 -mcpu=native` |
-| code | branch `threading`, commit 7b0db91 |
+| code | branch `threading`, commit 7b0db91 (later commits change no decode or coding path: thread-pool and output-file error handling, a work-unit overflow guard; files are byte-identical) |
 | date | 2026-11-16 |
 
 Each configuration was run twice, once with a single encoder thread and once with the default automatic thread count (14 threads on this machine for every 4096² encode, 4 for JPEG2000 with 256² tiles). Decoding is single-threaded in both, so only the encode columns differ:

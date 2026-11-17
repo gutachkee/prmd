@@ -27,7 +27,7 @@ sudo apt install build-essential cmake pkg-config \
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release        # -DPRMD_NATIVE=OFF to skip -mcpu=native
 cmake --build build -j
-(cd build && ctest -j8 --output-on-failure)       # 884 tests
+(cd build && ctest -j8 --output-on-failure)       # 885 tests
 ```
 
 This produces `build/prmd` (CLI), `build/prmdbench` (benchmark), `build/prmdpipeline`

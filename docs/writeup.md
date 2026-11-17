@@ -2,17 +2,17 @@
 
 `prmd` stores an 8-bit gray (or RGB) image and its N-level 2× pyramid in **one file** and decodes any `(level, x, y, w, h)` crop by reading and decoding only the blocks that crop depends on. A lossless 4096² gray image with 5 levels takes **11.2–11.6 MiB**: **23–26% smaller** than storing every level as independent 256² tiles (15.0 MiB, same entropy coder) and smaller than raw level 0 alone (16 MiB). On one core of a MacBook Pro (Apple Silicon), a random 256² crop decodes in **0.24–0.56 ms** at any level.
 
-Build with `cmake -B build && cmake --build build -j`; the CLI encodes an image (`build/prmd encode`) and saves a decoded crop as PNG (`build/prmd decode … -o crop.png`). The [README](../README.md) has the commands, the C++ API and the 884 tests; [modes.md](modes.md), [design.md](design.md), [benchmarks.md](benchmarks.md) and [benchmarks-pi5.md](benchmarks-pi5.md) the details.
+The [README](../README.md) has the build, the CLI (`prmd encode`, `prmd decode … -o crop.png`), the C++ API and the 885 tests; [design.md](design.md) and [benchmarks.md](benchmarks.md) the details.
 
 ## 1. Design
 
 **Key idea.** Only the coarsest level is stored as pixels. Each finer level L is stored as the *detail* that turns level L+1 back into level L. With a wavelet, each 2×2 block of pixels becomes 1 coarse pixel plus 3 detail numbers, so the pyramid costs as many samples as level 0 alone, not 1.33×. A level-L crop starts from the matching patch of the coarsest level and walks down, adding detail only where needed; the patch halves at each step up, and levels finer than L are never read.
 
-**Modes** set what a level is: `haar` (default) makes level L+1 the exact integer 2×2 mean and stores 3 Haar detail bands; `cdf53` uses the sharper JPEG2000 5/3 lowpass; `laplacian` stores the residual of a `box` or `gauss` downsample against the upsampled coarser level (~1.33× samples); `naive` stores every level as pixels, the task's baseline.
+**Modes** set what a level is: `haar` (default) makes level L+1 the exact integer 2×2 mean and stores 3 Haar detail bands; `cdf53` uses the sharper JPEG2000 5/3 lowpass; `laplacian` stores residuals against any downsampler (~1.33× samples); `naive` stores every level as pixels, the task's baseline.
 
-**Random access.** Opening a file reads the 64-byte header, then the level table and block index. A crop maps to its blocks by arithmetic on (level, tile, block), so nothing scans the file; adjacent blocks are fetched with one `pread`. Each block is entropy-coded on its own, so a crop equals the same region of a full decode and is seamless by construction. Tests compare crops inside one tile, across 2 and 4 tiles, on edges and corners, and full levels bit for bit with a reference pyramid built by separate code, in every mode; overwriting every block a crop shouldn't need with random bytes leaves it unchanged. **Out-of-bounds requests are rejected**: `decode()` throws `std::out_of_range` and the CLI exits with code 4; `decode_clamped()` (`--clamp`) decodes the intersection instead.
+**Random access.** Opening a file reads the 64-byte header, then the level table and block index. A crop maps to its blocks by arithmetic on (level, tile, block), so nothing scans the file; adjacent blocks are fetched with one `pread`. Each block is entropy-coded on its own, so a crop equals the same region of a full decode and is seamless by construction. Tests compare crops inside one tile, across 2 and 4 tiles, on edges and corners, and full levels bit for bit with a reference pyramid built from the source by separate code; overwriting every block a crop shouldn't need with random bytes leaves it unchanged. **Out-of-bounds requests are rejected**: `decode()` throws `std::out_of_range` and the CLI exits with code 4; `decode_clamped()` (`--clamp`) decodes the intersection instead.
 
-**Coding.** Each block is coded with zstd at level 1; a custom context-adaptive range coder makes files about 4% smaller but decodes about 12× slower. RGB uses the reversible YCoCg-R transform and stays bit-exact. `--quant Q` quantizes the detail or residual numbers without changing the decode path; `laplacian` is closed loop and keeps every gray level within ±Q/2.
+**Coding.** Each block is coded with zstd at level 1 (a custom range coder is optional). RGB uses the reversible YCoCg-R transform and stays bit-exact. `--quant Q` quantizes the detail or residual numbers without changing the decode path.
 
 ## 2. Format layout
 
@@ -31,7 +31,7 @@ offset 0   ┌──────────────────────
            └───────────────────────────────────────────────┘
 ```
 
-Each level is cut into 128² code-blocks, the unit that's decoded, read and cached, stored tile by tile so a 256² tile's 2×2 blocks are adjacent on disk. Block *b* is the bytes from `offset[b]` to `offset[b+1]`; all channels of an area share one block. The header, level table and offsets are validated against the geometry before anything is allocated ([design.md §3](design.md)).
+Each level is cut into 128² code-blocks (the unit decoded, read and cached), stored tile by tile so a 256² tile's 2×2 blocks are adjacent on disk. Block *b* is the bytes from `offset[b]` to `offset[b+1]`; all channels share one block. Everything is validated before allocation ([design.md §3](design.md)).
 
 ## 3. Results and trade-offs
 
@@ -56,15 +56,13 @@ Mean / p95 latency, then tiles touched and block bytes read per crop (*tiles*: d
 
 **Compression vs. access granularity.** A `haar` crop also decodes the coarser blocks it's built from (about 2× `naive`'s blocks, 1.0–1.5× its bytes) for a 23% smaller file, yet is about as fast (within 6% at 256², 5–11% slower at 512²): detail blocks need only adds and shifts, while `naive`'s pixel blocks run the serial MED predictor. Decoding all of L0 and then cropping costs 82 ms, about **145×** a crop; a 64 MiB block cache brings a crop on a random walk down to 0.19 ms.
 
-**Decode speed vs. size.** zstd level 19 decodes as fast as level 1 but encodes 13–36× slower on one thread; it makes gray lossless files no smaller and RGB files 2.7–4.1% smaller (lossy 3–12%, from an earlier run). The range coder would save about 4% at 12× the decode time; crop latency matters more here.
+**Decode speed vs. size.** The range coder would save about 4% at 12× the decode time, and zstd level 19 saves nothing on gray lossless files; crop latency matters more here. Encoding is multithreaded with a byte-identical file: 4096² gray takes 72 → 20 ms on 14 cores, 219 → 96 ms on a 4-core Pi 5.
 
-**Multithreaded encoder.** The encoder codes blocks and transform row stripes on a thread pool whose size it picks from the image's work, with no format change and a byte-identical file for every thread count. On the 14-core MacBook Pro the 4096² gray pyramid encodes in 72 → 20 ms, RGB in 288 → 64 ms and the full 8824×5336 image in 234 → 55 ms; on the 4-core Pi 5, 4096² gray goes from 217 to 96 ms.
+**Level definition and PSNR.** `haar` levels are the exact 2×2 mean but alias; `cdf53` is sharper (24–30 dB from the 2×2 mean: a different filter, not lower quality), so the matcher should pick the mode. Lossless files decode bit for bit. With `--quant 4`, `cdf53` gives 41.9 dB at 3.53 bits/px; only `laplacian` bounds the per-pixel error (±Q/2 on gray). Tables: [benchmarks.md](benchmarks.md#lossy).
 
-**Level definition and PSNR.** `haar` levels are the exact 2×2 mean but alias; `cdf53` and `laplacian-gauss` levels are sharper or smoother, 24–30 dB from the 2×2 mean (a different filter, not lower quality), so the matcher should decide the mode. Lossless files decode bit for bit. With `--quant 4`, `cdf53` gives 41.9 dB at 3.53 bits/px (2–4 dB above `haar`); `laplacian` is the only mode with a per-pixel bound (±Q/2 on gray; on RGB the bound holds on Y/Co/Cg, and the RGB error reaches Q). [modes.md](modes.md#modes-and-psnr) and [benchmarks.md](benchmarks.md#lossy) have the tables.
+**Why not JPEG2000?** It's built in (OpenJPEG 2.5.4) and benchmarked: it compresses about 6% better and wins lossy rate–distortion (44.7 dB at 3.14 bits/px), but crops decode **15–27× slower** and encoding is 19× slower on one thread. Its tiles are defined at full resolution and hold all their resolutions, so a 256² crop at L4 reads the **whole file** (10.8 MiB against 44 KiB), with every layout we tried ([design.md §8](design.md)).
 
-**Why not JPEG2000?** It's built in (OpenJPEG 2.5.4) and benchmarked. It compresses about 6% better and wins lossy rate–distortion (44.7 dB at 3.14 bits/px), but crops decode **15–27× slower** and encoding is 19× slower on one thread. Its tiles are defined at full resolution and hold all their resolutions, so with 256² tiles and TLM a 256² crop at L4 reads the **whole file** (10.8 MiB against 44 KiB); OpenJPEG read as much or more with every resolution-split layout we tried ([design.md §8](design.md)).
-
-**Embedded ARM.** About 4.8k lines of plain C++17 in `src/` and `include/` (non-blank, non-comment; 4.0k without the JPEG2000 backend and the profiler), plus zstd, which every embedded Linux ships. Integer arithmetic only, no SIMD required. Decode memory is O(crop area), not the whole level: `prmd decode` of a 512² L0 crop of the 4096² file peaks at 7.2–7.7 MB RSS for the whole process (4.3 MB for `prmd info` alone). On a Raspberry Pi 5 a 256² crop takes 0.7–1.4 ms, 11–20× faster than JPEG2000.
+**Embedded ARM.** About 4.8k lines of plain C++17 (non-blank, non-comment), plus zstd, which every embedded Linux ships. Integer arithmetic only, no SIMD required. Decode memory is O(crop area): `prmd decode` of a 512² L0 crop of the 4096² file peaks at about 8 MB RSS for the whole process (4.4 MB for `prmd info` alone). On a Raspberry Pi 5 a 256² crop takes 0.7–1.4 ms, 11–20× faster than JPEG2000.
 
 ## 4. Limitations
 
@@ -72,7 +70,7 @@ Mean / p95 latency, then tiles touched and block bytes read per crop (*tiles*: d
 - 32-bit block offsets cap a file at 4 GiB.
 - No checksums: a damaged block can decode to wrong pixels silently.
 - Lossy `haar` and `cdf53` have no per-pixel error bound, and JPEG2000 beats every mode on lossy rate–distortion.
-- On RGB, zstd files are 12–17% larger than with the range coder, which makes JPEG2000 smaller than the default `.prmd` RGB file (`haar+range` is still the smallest).
+- On RGB, zstd files are 12–17% larger than range-coded ones, so JPEG2000 beats the default `.prmd` RGB file (`haar+range` is smallest).
 
 ## 5. Next steps
 
