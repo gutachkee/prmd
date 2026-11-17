@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -658,9 +659,15 @@ uint64_t prmd_work_units(int width, int height, const EncodeOptions& o) {
   if (width <= 0 || height <= 0) {
     return 0;
   }
-  return uint64_t(width) * uint64_t(height) *
-         uint64_t(prmd::channels(o.color)) * uint64_t(work_weight(o)) /
-         kWeightOne;
+  // Saturates instead of wrapping (no real image comes near: the result
+  // only picks a thread count).
+  const uint64_t w = uint64_t(width) * uint64_t(height);  // < 2^62
+  const uint64_t per_sample =
+      uint64_t(prmd::channels(o.color)) * uint64_t(work_weight(o));
+  if (per_sample != 0 && w > UINT64_MAX / per_sample) {
+    return UINT64_MAX / kWeightOne;
+  }
+  return w * per_sample / kWeightOne;
 }
 
 EncodeReport encode_prmd(const Image& src,
