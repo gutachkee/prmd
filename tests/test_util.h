@@ -1,9 +1,14 @@
 #pragma once
 // Shared helpers for codec tests.
 
+#include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -24,19 +29,75 @@ inline void PrintTo(ColorFormat f, std::ostream* os) {
 
 namespace testutil {
 
+// remove_all, also of a tree in which a failed test left a directory
+// read-only (tests/test_output_file.cpp): its owner bits are restored first.
+inline void force_remove_all(const std::filesystem::path& p) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::remove_all(p, ec);
+  if (!ec) {
+    return;
+  }
+  for (fs::recursive_directory_iterator it(p, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    std::error_code pec;
+    if (it->is_directory(pec) && !it->is_symlink(pec)) {
+      fs::permissions(it->path(), fs::perms::owner_all, fs::perm_options::add,
+                      pec);
+    }
+  }
+  fs::remove_all(p, ec);
+}
+
+// Removes the prmd_tests_<pid> directories that test processes killed
+// before their exit (a ctest timeout, a crash) left in `tmp`: only ours,
+// untouched for an hour, and whose process no longer exists.
+inline void remove_stale_test_dirs(const std::filesystem::path& tmp) {
+  namespace fs = std::filesystem;
+  const std::string prefix = "prmd_tests_";
+  const auto now = fs::file_time_type::clock::now();
+  std::error_code ec;
+  for (fs::directory_iterator it(tmp, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (name.rfind(prefix, 0) != 0 || name.size() == prefix.size() ||
+        name.find_first_not_of("0123456789", prefix.size()) !=
+            std::string::npos) {
+      continue;
+    }
+    struct stat st;
+    if (::lstat(it->path().c_str(), &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != ::geteuid()) {
+      continue;
+    }
+    std::error_code tec;
+    const auto mtime = fs::last_write_time(it->path(), tec);
+    if (tec || now - mtime < std::chrono::hours(1)) {
+      continue;
+    }
+    const long pid = std::strtol(name.c_str() + prefix.size(), nullptr, 10);
+    if (pid <= 0 || pid == long(::getpid()) ||
+        !(::kill(pid_t(pid), 0) != 0 && errno == ESRCH)) {
+      continue;
+    }
+    force_remove_all(it->path());
+  }
+}
+
 inline std::filesystem::path temp_path(const std::string& name) {
   // Per-process directory: ctest runs every test as its own process, in
-  // parallel.
+  // parallel. Removed at exit; directories left by killed processes are
+  // removed by a later run.
   struct Dir {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
                                  ("prmd_tests_" + std::to_string(::getpid()));
 
-    Dir() { std::filesystem::create_directories(path); }
-
-    ~Dir() {
-      std::error_code ec;
-      std::filesystem::remove_all(path, ec);  // clean up at process exit
+    Dir() {
+      remove_stale_test_dirs(path.parent_path());
+      std::filesystem::create_directories(path);
     }
+
+    ~Dir() { force_remove_all(path); }  // clean up at process exit
   };
   static Dir dir;
   return dir.path / name;

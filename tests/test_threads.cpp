@@ -23,7 +23,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <climits>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -667,8 +669,14 @@ std::mutex g_stripe_m;
 std::set<std::thread::id> g_stripe_threads;
 
 void record_stripe(int, int) {
-  const std::lock_guard<std::mutex> lock(g_stripe_m);
-  g_stripe_threads.insert(std::this_thread::get_id());
+  {
+    const std::lock_guard<std::mutex> lock(g_stripe_m);
+    g_stripe_threads.insert(std::this_thread::get_id());
+  }
+  // Long enough for the workers to be scheduled and take stripes, even on
+  // one CPU: otherwise the caller may run every stripe before any worker
+  // wakes up.
+  std::this_thread::sleep_for(std::chrono::microseconds(200));
 }
 
 struct StripeObserver {
@@ -1191,29 +1199,57 @@ constexpr bool kThreadSanitizer = false;
 constexpr bool kThreadSanitizer = false;
 #endif
 
-// Threads of this process (Linux: entries of /proc/self/task), 0 if unknown.
-int process_threads() {
+// Thread ids of this process (Linux: entries of /proc/self/task); empty if
+// unknown.
+std::set<long> task_ids() {
   std::error_code ec;
-  int n = 0;
+  std::set<long> ids;
   for (std::filesystem::directory_iterator it("/proc/self/task", ec), end;
        !ec && it != end; it.increment(ec)) {
-    ++n;
+    ids.insert(std::strtol(it->path().filename().c_str(), nullptr, 10));
   }
-  return ec ? 0 : n;
+  return ec ? std::set<long>{} : ids;
 }
 
-// zstd coder that records which threads coded blocks, and the process's
-// thread count while it runs.
+// task_ids() once two reads 1 ms apart agree (at most about 2 s): a thread
+// that an earlier test joined can stay listed for a moment after the join.
+std::set<long> settled_task_ids() {
+  std::set<long> prev = task_ids();
+  for (int i = 0; i < 2000; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::set<long> cur = task_ids();
+    if (cur == prev) {
+      return cur;
+    }
+    prev = std::move(cur);
+  }
+  return prev;
+}
+
+// How many of `now` are not in `base`.
+int new_ids(const std::set<long>& base, const std::set<long>& now) {
+  int n = 0;
+  for (const long id : now) {
+    n += base.count(id) == 0 ? 1 : 0;
+  }
+  return n;
+}
+
+// zstd coder that records which threads coded blocks, and how many threads
+// the process had, beyond those of `base`, while it ran: a thread created
+// by the encode is a new id (ids that leave the list do not count).
 class ThreadRecordingCoder final : public internal::BlockCoder {
  public:
-  ThreadRecordingCoder() : inner_(internal::make_block_coder(Entropy::Zstd)) {}
+  explicit ThreadRecordingCoder(std::set<long> base)
+      : inner_(internal::make_block_coder(Entropy::Zstd)),
+        base_(std::move(base)) {}
   Entropy id() const override { return Entropy::Zstd; }
   void encode(const internal::BlockPlanes& in,
               std::vector<uint8_t>& out) const override {
     {
       const std::lock_guard<std::mutex> lock(m_);
       ids_.insert(std::this_thread::get_id());
-      max_threads_ = std::max(max_threads_, process_threads());
+      max_new_ = std::max(max_new_, new_ids(base_, task_ids()));
     }
     inner_->encode(in, out);
   }
@@ -1226,17 +1262,29 @@ class ThreadRecordingCoder final : public internal::BlockCoder {
     const std::lock_guard<std::mutex> lock(m_);
     return ids_;
   }
-  int max_threads() const {
+  // Most threads seen at once that were not in `base`.
+  int max_new_threads() const {
     const std::lock_guard<std::mutex> lock(m_);
-    return max_threads_;
+    return max_new_;
   }
 
  private:
   std::unique_ptr<internal::BlockCoder> inner_;
+  const std::set<long> base_;
   mutable std::mutex m_;
   mutable std::set<std::thread::id> ids_;
-  mutable int max_threads_ = 0;
+  mutable int max_new_ = 0;
 };
+
+// Waits (at most about 2 s) until no thread outside `base` is left.
+int threads_left(const std::set<long>& base) {
+  int n = new_ids(base, task_ids());
+  for (int i = 0; i < 2000 && n > 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    n = new_ids(base, task_ids());
+  }
+  return n;
+}
 
 }  // namespace
 
@@ -1245,8 +1293,8 @@ TEST(ThreadsSerial, OneThreadStartsNoThreadAndMatchesTheGoldenFile) {
   EncodeOptions o = c.opts;
   o.threads = 1;
   const std::string path = testutil::temp_path("serial.prmd").string();
-  const ThreadRecordingCoder serial;
-  const int before = process_threads();
+  const std::set<long> before = settled_task_ids();
+  const ThreadRecordingCoder serial(before);
   const EncodeReport r = internal::encode_prmd(source_of(c), path, o, &serial);
   EXPECT_EQ(r.threads, 1);
   EXPECT_EQ(file_hash(path), golden().at(c.name));
@@ -1256,17 +1304,21 @@ TEST(ThreadsSerial, OneThreadStartsNoThreadAndMatchesTheGoldenFile) {
 
   // The same with 4 threads: same file, at most 4 coding threads.
   o.threads = 4;
-  const ThreadRecordingCoder mt;
+  const ThreadRecordingCoder mt(before);
   EXPECT_EQ(internal::encode_prmd(source_of(c), path, o, &mt).threads, 4);
   EXPECT_EQ(file_hash(path), golden().at(c.name));
   EXPECT_LE(mt.ids().size(), 4u);
-  if (before > 0 && !kThreadSanitizer) {
-    // The process thread count while blocks were coded: the serial encode
-    // added none, the 4-thread one exactly 3 workers, joined at the end.
-    // (TSan starts a helper thread with the first thread created.)
-    EXPECT_EQ(serial.max_threads(), before);
-    EXPECT_EQ(mt.max_threads(), before + 3);
-    EXPECT_EQ(process_threads(), before);
+  if (!before.empty()) {
+    // Threads created while blocks were coded: none by the serial encode,
+    // the 3 workers by the 4-thread one, joined at the end. (TSan starts a
+    // helper thread with the first thread created.)
+    EXPECT_EQ(serial.max_new_threads(), 0);
+    if (!kThreadSanitizer) {
+      EXPECT_EQ(mt.max_new_threads(), 3);
+      EXPECT_EQ(threads_left(before), 0);
+    } else {
+      EXPECT_GE(mt.max_new_threads(), 3);
+    }
   }
 }
 
@@ -1282,15 +1334,15 @@ TEST(ThreadsAuto, SmallImagesStartNoThread) {
               1)
         << name;
     const std::string path = testutil::temp_path("auto_small.prmd").string();
-    const ThreadRecordingCoder coder;
-    const int before = process_threads();
+    const std::set<long> before = task_ids();
+    const ThreadRecordingCoder coder(before);
     const EncodeReport r = internal::encode_prmd(source_of(c), path, o, &coder);
     EXPECT_EQ(r.threads, 1) << name;
     EXPECT_EQ(file_hash(path), golden().at(c.name)) << name;
     EXPECT_EQ(coder.ids(),
               std::set<std::thread::id>{std::this_thread::get_id()});
-    if (before > 0) {
-      EXPECT_EQ(coder.max_threads(), before) << name;
+    if (!before.empty()) {
+      EXPECT_EQ(coder.max_new_threads(), 0) << name;
     }
   }
 }
